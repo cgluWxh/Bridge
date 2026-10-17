@@ -131,7 +131,18 @@ pub fn join(credentials: Credentials) -> Result<(), String> {
         for guid in &guids {
             let mut reason = 0;
             // WLAN_PROFILE_USER = 2. Let the system manage connect/disconnect normally.
-            let code = WlanSetProfile(handle.0, guid, 2, xml.as_ptr(), null(), 1, null(), &mut reason);
+            let mut code = WlanSetProfile(handle.0, guid, 2, xml.as_ptr(), null(), 1, null(), &mut reason);
+            // A same-name all-user profile cannot be overwritten as a per-user
+            // profile (ERROR_ALREADY_EXISTS). Update it in its original scope.
+            if code == 183 {
+                code = WlanSetProfile(handle.0, guid, 0, xml.as_ptr(), null(), 1, null(), &mut reason);
+                if code != 0 {
+                    // Existing system-managed profiles may be read-only. Try that
+                    // real-SSID profile directly rather than inventing another name.
+                    code = WlanConnect(handle.0, guid, &params, null());
+                    if code == 0 { accepted = true; break; }
+                }
+            }
             if code != 0 { last_error = code; continue; }
             let code = WlanConnect(handle.0, guid, &params, null());
             if code == 0 { accepted = true; break; }

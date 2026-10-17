@@ -71,6 +71,15 @@ object RootHotspot {
                         done.countDown()
                         return@post
                     }
+                    // WIFI_AP_STATE_ENABLED = 13. Do not restart an existing hotspot.
+                    val alreadyEnabled = runCatching {
+                        wifi.javaClass.getMethod("getWifiApState").invoke(wifi) as Int == 13
+                    }.getOrDefault(false)
+                    if (alreadyEnabled) {
+                        result.set(config)
+                        done.countDown()
+                        return@post
+                    }
                     val manager = context.getSystemService("tethering") ?: error("tethering unavailable")
                     val callbackClass = Class.forName("android.net.TetheringManager\$StartTetheringCallback")
                     val callback =
@@ -87,7 +96,14 @@ object RootHotspot {
                                 }
 
                                 "onTetheringFailed" -> {
-                                    result.set("ERR\ttethering_${args?.firstOrNull() as? Int ?: -1}")
+                                    val code = args?.firstOrNull() as? Int ?: -1
+                                    // Some ROMs reject a duplicate start with 18. Let the
+                                    // computer try the saved configuration without toggling Wi-Fi.
+                                    if (code == 18) {
+                                        result.set(runCatching { configuration() }.getOrDefault("ERR\tconfiguration_unavailable"))
+                                    } else {
+                                        result.set("ERR\ttethering_$code")
+                                    }
                                     done.countDown()
                                     null
                                 }
