@@ -1208,7 +1208,10 @@ impl App {
             Event::ShareFinished(result) => {
                 match result {
                     Ok(text) => self.log("files", &text),
-                    Err(text) => { self.log("files", &text); self.error = Some(text); }
+                    Err(text) => {
+                        self.log("files", &text);
+                        self.error = Some(("Couldn't receive files".into(), text, false));
+                    }
                 }
                 self.refresh();
             }
@@ -1715,7 +1718,6 @@ fn main() {
                 app.connect();
             }
         });
-        let a = app.clone();
         // Refresh. Linked: the phone resends everything (status, battery,
         // mode, Now Playing and its cover). Not linked: any half-made
         // connection is dropped and the search starts over. The icon spins.
