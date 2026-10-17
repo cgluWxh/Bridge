@@ -61,6 +61,13 @@ export global AppState {
     callback primary();
     callback refresh();
     in-out property <bool> refreshing: false;
+    in-out property <bool> focus-active: false;
+    in-out property <bool> focus-show-list: false;
+    in-out property <int> focus-count: 0;
+    in-out property <string> focus-list: "";
+    in-out property <string> focus-detail: "";
+    callback set-focus(int);
+    callback clear-focus();
     callback pause-phone();
     callback join-phone-hotspot();
     callback toggle-phone-tunnel();
@@ -338,6 +345,31 @@ export component MainWindow inherits Window {
             CapabilityTile { icon: @image-url("icons/bell.svg"); cap: AppState.notifications; }
             Divider {}
             CapabilityTile { icon: @image-url("icons/clipboard.svg"); cap: AppState.clipboard; }
+        }
+
+        SectionTitle { text: AppState.focus-active ? "Focus mode · active" : "Focus mode"; }
+        Muted { text: AppState.focus-detail; }
+        Card {
+            HorizontalLayout {
+                spacing: 6px; padding: 8px;
+                PillButton { text: "15 min"; clicked => { AppState.set-focus(15); } }
+                PillButton { text: "30 min"; clicked => { AppState.set-focus(30); } }
+                PillButton { text: "1 hour"; clicked => { AppState.set-focus(60); } }
+            }
+            HorizontalLayout {
+                spacing: 6px; padding: 8px;
+                PillButton { text: AppState.focus-active ? "End focus" : "Until turned off"; clicked => { AppState.set-focus(AppState.focus-active ? -1 : 0); } }
+                PillButton { text: "Notifications (" + AppState.focus-count + ")"; clicked => { AppState.focus-show-list = !AppState.focus-show-list; } }
+            }
+            if AppState.focus-show-list : VerticalLayout {
+                padding: 10px; spacing: 8px;
+                Label { text: "During focus mode"; }
+                ScrollView {
+                    height: 220px;
+                    Text { text: AppState.focus-list == "" ? "No notifications collected" : AppState.focus-list; wrap: word-wrap; color: Theme.on-surface; }
+                }
+                PillButton { text: "Clear list"; clicked => { AppState.clear-focus(); } }
+            }
         }
 
         // Actions.

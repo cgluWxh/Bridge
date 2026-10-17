@@ -15,8 +15,11 @@ final class NotificationBridge {
     private var warnedAboutAccess = false
     private let log: (String) -> Void
 
-    init(log: @escaping (String) -> Void) {
+    private let onNotification: (String) -> Void
+
+    init(log: @escaping (String) -> Void, onNotification: @escaping (String) -> Void) {
         self.log = log
+        self.onNotification = onNotification
     }
 
     func start(ticket: String, port: Int) {
@@ -90,15 +93,11 @@ final class NotificationBridge {
             if line.isEmpty { continue }                            // keepalive
             let parts = line.components(separatedBy: "\t")
             guard parts.count >= 3 else { continue }
-            show(app: parts[0], title: parts[1], body: parts[2], package: parts.count > 3 ? parts[3] : "")
+            onNotification(line)
         }
         s.closeStream()
         stream = nil
         return true
-    }
-
-    private func show(app: String, title: String, body: String, package: String) {
-        Self.post(app: app, title: title, body: body, package: package)
     }
 
     /// Where the phone's app icons are cached, one PNG per package.

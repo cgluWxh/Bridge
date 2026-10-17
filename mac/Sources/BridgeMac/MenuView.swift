@@ -18,6 +18,7 @@ struct MenuView: View {
                 primaryButton
                 if !bridge.media.isEmpty { NowPlayingCard(bridge: bridge) }
                 capabilities
+                focusSection
                 actions
                 logSection
             }
@@ -177,6 +178,46 @@ struct MenuView: View {
         }
         .padding(.vertical, 3)
         .innerCard()
+    }
+
+    private var focusSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(bridge.focusActive ? "Focus mode · active" : "Focus mode").font(.headline)
+                Spacer()
+                Menu {
+                    Button("15 minutes") { bridge.startFocus(minutes: 15) }
+                    Button("30 minutes") { bridge.startFocus(minutes: 30) }
+                    Button("1 hour") { bridge.startFocus(minutes: 60) }
+                    Button("Until turned off") { bridge.startFocus(minutes: nil) }
+                } label: { Image(systemName: "moon") }
+                if bridge.focusActive { Button("End") { bridge.endFocus() } }
+            }
+            if let until = bridge.focusUntil {
+                Text("Until \(until.formatted(date: .omitted, time: .shortened))").font(.caption).foregroundStyle(.secondary)
+            }
+            Button("During focus mode (\(bridge.focusNotifications.count))") { bridge.showFocusList.toggle() }
+            if bridge.showFocusList {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        if bridge.focusNotifications.isEmpty { Text("No notifications collected").foregroundStyle(.secondary) }
+                        ForEach(bridge.focusNotifications.reversed()) { notification in
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack {
+                                    Text(notification.app).bold()
+                                    Spacer()
+                                    Text(notification.received, style: .time).foregroundStyle(.secondary)
+                                }
+                                Text(notification.title).fontWeight(.medium)
+                                Text(notification.body).textSelection(.enabled)
+                                Divider()
+                            }.font(.caption)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(height: 200)
+                Button("Clear list") { bridge.focusNotifications.removeAll() }
+            }
+        }.padding(10).innerCard()
     }
 
     private var actions: some View {

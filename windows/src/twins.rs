@@ -22,6 +22,8 @@ const TABLE: &[(&str, &str)] = &[
     ("viber.exe", "com.viber.voip"),
     ("skype.exe", "com.skype.raider"),
     ("wechat.exe", "com.tencent.mm"),
+    ("weixin.exe", "com.tencent.mm"),
+    ("line.exe", "jp.naver.line.android"),
 ];
 
 /// Android packages whose Windows twin is running right now.

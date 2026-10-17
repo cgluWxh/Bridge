@@ -1,4 +1,4 @@
-//! Join a phone hotspot using a temporary native WLAN profile held only in memory.
+//! Join the real phone hotspot using a normal per-user Windows WLAN profile.
 //! Never put credentials in process arguments, temporary files, or logs.
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
@@ -49,6 +49,8 @@ extern "system" {
     fn WlanEnumInterfaces(handle: *mut c_void, reserved: *const c_void, list: *mut *mut InterfaceList) -> u32;
     fn WlanFreeMemory(memory: *mut c_void);
     fn WlanConnect(handle: *mut c_void, guid: *const GUID, params: *const ConnectionParameters, reserved: *const c_void) -> u32;
+    fn WlanSetProfile(handle: *mut c_void, guid: *const GUID, flags: u32, xml: *const u16,
+        security: *const u16, overwrite: i32, reserved: *const c_void, reason: *mut u32) -> u32;
     fn WlanQueryInterface(handle: *mut c_void, guid: *const GUID, opcode: u32, reserved: *const c_void,
         size: *mut u32, data: *mut *mut c_void, value_type: *mut u32) -> u32;
 }
@@ -67,7 +69,8 @@ fn xml_escape(text: &str) -> String {
         .replace('"', "&quot;").replace('\'', "&apos;")
 }
 
-fn profile(c: &Credentials, name: &str) -> String {
+fn profile(c: &Credentials) -> String {
+    let name = xml_escape(&c.ssid);
     let (authentication, encryption) = match c.security.as_str() {
         "open" => ("open", "none"),
         "wpa3" => ("WPA3SAE", "AES"),
@@ -81,6 +84,7 @@ fn profile(c: &Credentials, name: &str) -> String {
 
 /// Native query returns WLAN_CONNECTION_ATTRIBUTES. Inspect only its fixed header + DOT11_SSID.
 unsafe fn connected(handle: *mut c_void, guid: &GUID, ssid: &[u8], profile_name: &str) -> bool {
+    unsafe {
     let (mut size, mut data, mut kind) = (0, null_mut(), 0);
     if WlanQueryInterface(handle, guid, 7, null(), &mut size, &mut data, &mut kind) != 0 || data.is_null() {
         return false;
@@ -95,6 +99,7 @@ unsafe fn connected(handle: *mut c_void, guid: &GUID, ssid: &[u8], profile_name:
         .map(|b| u16::from_ne_bytes([b[0], b[1]])).take_while(|c| *c != 0).collect();
     state == 1 && len <= 32 && &bytes[524..524 + len] == ssid &&
         active_profile == profile_name.encode_utf16().collect::<Vec<_>>()
+    }
 }
 
 /// Errors are deliberately generic: never forward native profile/credential content to logs.
@@ -115,13 +120,19 @@ pub fn join(credentials: Credentials) -> Result<(), String> {
         let guids: Vec<GUID> = interfaces.iter().filter(|i| i.state != 0).map(|i| i.guid).collect();
         drop(memory);
         if guids.is_empty() { return Err("Turn this PC's Wi-Fi on and try again".into()); }
-        let profile_name = format!("BridgeHotspot-{}", crate::protocol::nonce());
-        let xml: Vec<u16> = profile(&credentials, &profile_name).encode_utf16().chain(Some(0)).collect();
-        let params = ConnectionParameters { mode: 1, profile: xml.as_ptr(), ssid: null(), bssid_list: null(), bss_type: 1, flags: 0 };
-        // WLAN_CONNECTION_MODE_TEMPORARY_PROFILE: do not persist a plaintext XML file or saved profile.
+        let profile_name = &credentials.ssid;
+        let xml: Vec<u16> = profile(&credentials).encode_utf16().chain(Some(0)).collect();
+        let name: Vec<u16> = profile_name.encode_utf16().chain(Some(0)).collect();
+        let params = ConnectionParameters { mode: 0, profile: name.as_ptr(), ssid: null(), bssid_list: null(), bss_type: 1, flags: 0 };
+        // Normal saved profile, named exactly after the real SSID. Windows protects the
+        // stored key; no plaintext file or fabricated temporary network is created.
         let mut accepted = false;
         let mut last_error = 0;
         for guid in &guids {
+            let mut reason = 0;
+            // WLAN_PROFILE_USER = 2. Let the system manage connect/disconnect normally.
+            let code = WlanSetProfile(handle.0, guid, 2, xml.as_ptr(), null(), 1, null(), &mut reason);
+            if code != 0 { last_error = code; continue; }
             let code = WlanConnect(handle.0, guid, &params, null());
             if code == 0 { accepted = true; break; }
             last_error = code;
@@ -143,12 +154,13 @@ mod tests {
     use super::*;
     #[test]
     fn redacts_debug_and_escapes_profile() {
-        let c = Credentials { ssid: "手机<&".into(), password: "secret<&123".into(), security: "wpa2".into() };
+        let c = Credentials { ssid: "Phone<&".into(), password: "secret<&123".into(), security: "wpa2".into() };
         assert!(c.validate());
         assert!(!format!("{c:?}").contains(&c.password));
-        let p = profile(&c, "BridgeHotspot-test");
+        let p = profile(&c);
         assert!(p.contains("secret&lt;&amp;123"));
         assert!(p.contains(&hex::encode(c.ssid.as_bytes())));
-        assert!(!p.contains("<name>手机"));
+        assert!(p.contains("<name>Phone&lt;&amp;</name>"));
+        assert!(!p.contains("BridgeHotspot"));
     }
 }

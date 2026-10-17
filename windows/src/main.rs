@@ -117,6 +117,10 @@ struct App {
     /// The phone's last status report (battery, network, mode, model…).
     phone_status: std::collections::HashMap<String, String>,
     usb_busy: bool,
+    focus_active: bool,
+    focus_until: Option<Instant>,
+    focus_generation: u64,
+    focus_notifications: Vec<(protocol::PhoneNotification, String)>,
     hotspot_pending: Option<String>,
     hotspot_joining: bool,
     hotspot_status: String,
@@ -177,6 +181,10 @@ impl App {
             session_ping_at: Instant::now(),
             session_ping_misses: 0,
             usb_busy: false,
+            focus_active: false,
+            focus_until: None,
+            focus_generation: 0,
+            focus_notifications: Vec::new(),
             hotspot_pending: None,
             hotspot_joining: false,
             hotspot_status: String::new(),
@@ -203,6 +211,16 @@ impl App {
 
     fn refresh(&self) {
         let ui = self.window.global::<AppState>();
+        ui.set_focus_active(self.focus_active && self.focus_until.map(|t| Instant::now() < t).unwrap_or(true));
+        ui.set_focus_detail(if self.focus_active {
+            self.focus_until.map(|t| {
+                let seconds = t.saturating_duration_since(Instant::now()).as_secs();
+                format!("{} min remaining", (seconds + 59) / 60)
+            }).unwrap_or_else(|| "Until turned off".into())
+        } else { "Phone notifications collected during focus".into() }.into());
+        ui.set_focus_count(self.focus_notifications.len() as i32);
+        ui.set_focus_list(self.focus_notifications.iter().rev().map(|(n, time)|
+            format!("{time} · {}\n{}\n{}", n.app, n.title, n.body)).collect::<Vec<_>>().join("\n\n────────\n\n").into());
         ui.set_paired(self.creds.is_paired());
         ui.set_linked(self.linked);
         ui.set_searching(self.searching);
@@ -672,6 +690,19 @@ impl App {
             let _ = b.send_command(if on { "tunnel on" } else { "tunnel off" });
             self.log("bluetooth", if on { "asked the phone to start its tunnel" } else { "asked the phone to stop its tunnel" });
         }
+    }
+
+    fn set_focus(&mut self, minutes: i32) {
+        self.focus_generation = self.focus_generation.wrapping_add(1);
+        self.focus_active = minutes >= 0;
+        self.focus_until = if minutes > 0 { Some(Instant::now() + Duration::from_secs(minutes as u64 * 60)) } else { None };
+        if self.focus_active {
+            self.focus_notifications.clear();
+            self.window.global::<AppState>().set_focus_show_list(false);
+        } else {
+            self.window.global::<AppState>().set_focus_show_list(true);
+        }
+        self.refresh();
     }
 
     fn join_phone_hotspot(&mut self) {
@@ -1220,7 +1251,20 @@ impl App {
             }
             Event::Notification(n) => {
                 if self.settings.mirror_notifications {
-                    self.log("notify", &format!("{}: {}", n.app, n.title));
+                    if self.focus_active && self.focus_until.map(|t| Instant::now() >= t).unwrap_or(false) {
+                        self.set_focus(-1);
+                    }
+                    if self.focus_active {
+                        if n.id != 0 {
+                            self.focus_notifications.retain(|(old, _)| old.id != n.id || old.package != n.package);
+                        }
+                        self.focus_notifications.push((n, chrono::Local::now().format("%H:%M:%S").to_string()));
+                        if self.focus_notifications.len() > 200 { self.focus_notifications.remove(0); }
+                        self.refresh();
+                        return;
+                    }
+                    // Notification content must not be persisted in the application log.
+                    self.log("notify", "received phone notification");
                     // First notification from an app: ask the phone for its
                     // icon (96 px PNG over Bluetooth, cached for good). This
                     // toast goes out without it; the next one has it.
@@ -1669,6 +1713,27 @@ fn main() {
         });
         let a = app.clone();
         ui.on_pause_phone(move || a.borrow_mut().pause_phone());
+        let a = app.clone();
+        ui.on_set_focus(move |minutes| {
+            let mut app = a.borrow_mut();
+            app.set_focus(minutes);
+            if minutes > 0 {
+                let generation = app.focus_generation;
+                let weak = Rc::downgrade(&a);
+                Timer::single_shot(Duration::from_secs(minutes as u64 * 60), move || {
+                    if let Some(app) = weak.upgrade() {
+                        let mut app = app.borrow_mut();
+                        if app.focus_generation == generation { app.set_focus(-1); }
+                    }
+                });
+            }
+        });
+        let a = app.clone();
+        ui.on_clear_focus(move || {
+            let mut app = a.borrow_mut();
+            app.focus_notifications.clear();
+            app.refresh();
+        });
         let a = app.clone();
         ui.on_join_phone_hotspot(move || a.borrow_mut().join_phone_hotspot());
         let a = app.clone();

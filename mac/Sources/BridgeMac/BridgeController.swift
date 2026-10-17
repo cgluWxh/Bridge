@@ -31,6 +31,42 @@ final class BridgeController: ObservableObject {
     @Published var showOptions = false
     @Published var showLog = false
 
+    struct FocusNotification: Identifiable {
+        let id = UUID()
+        let phoneID: Int
+        let package: String
+        let app: String
+        let title: String
+        let body: String
+        let received: Date
+    }
+    @Published var focusActive = false
+    @Published var focusUntil: Date?
+    @Published var focusNotifications: [FocusNotification] = []
+    @Published var showFocusList = false
+    private var focusTimer: Timer?
+
+    func startFocus(minutes: Int?) {
+        focusTimer?.invalidate()
+        focusNotifications.removeAll()
+        showFocusList = false
+        focusActive = true
+        focusUntil = minutes.map { Date().addingTimeInterval(Double($0) * 60) }
+        if let minutes = minutes {
+            focusTimer = Timer.scheduledTimer(withTimeInterval: Double(minutes) * 60, repeats: false) { [weak self] _ in
+                Task { @MainActor in self?.endFocus() }
+            }
+        }
+    }
+
+    func endFocus() {
+        focusTimer?.invalidate()
+        focusTimer = nil
+        focusActive = false
+        focusUntil = nil
+        showFocusList = true
+    }
+
     /// The phone's address. A pasted "endpoint… <secret>" pair is split here,
     /// so the Paste button and the USB flow end up in the same place.
     @Published var ticket: String {
@@ -1141,6 +1177,14 @@ final class BridgeController: ObservableObject {
         let package = parts.count > 3 ? parts[3] : ""
         let id = parts.count > 4 ? Int(parts[4]) ?? 0 : 0
         let flags = parts.count > 5 ? parts[5] : ""
+        if focusActive, let until = focusUntil, Date() >= until { endFocus() }
+        if focusActive {
+            if id > 0 { focusNotifications.removeAll { $0.phoneID == id && $0.package == package } }
+            focusNotifications.append(FocusNotification(phoneID: id, package: package,
+                app: parts[0], title: parts[1], body: parts[2], received: Date()))
+            if focusNotifications.count > 200 { focusNotifications.removeFirst() }
+            return
+        }
         // First notification from an app: ask the phone for its icon (a small
         // PNG over Bluetooth, cached for good). This one goes out without it.
         if !package.isEmpty, !NotificationBridge.hasIcon(for: package), bluetoothLinked, !iconsRequested.contains(package) {
@@ -1208,7 +1252,8 @@ final class BridgeController: ObservableObject {
     }
 
     private lazy var notificationBridge = NotificationBridge(
-        log: { [weak self] line in Task { @MainActor in self?.appendLog(line, source: "phone") } })
+        log: { [weak self] line in Task { @MainActor in self?.appendLog(line, source: "phone") } },
+        onNotification: { [weak self] line in Task { @MainActor in self?.showPhoneNotification(line) } })
 
     func updateNotificationBridge() {
         let t = ticket.trimmingCharacters(in: .whitespacesAndNewlines)
