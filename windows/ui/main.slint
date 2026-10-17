@@ -21,6 +21,9 @@ export global AppState {
     in-out property <bool> linked: false;
     in-out property <bool> phone-tunnel-on: false;
     in-out property <bool> phone-paused: false;
+    in-out property <bool> phone-root: false;
+    in-out property <bool> hotspot-busy: false;
+    in-out property <string> hotspot-status: "";
     in-out property <bool> mirroring: false;
     /// The last USB setup stopped short; the hero button runs it again.
     in-out property <bool> usb-retry: false;
@@ -59,6 +62,7 @@ export global AppState {
     callback refresh();
     in-out property <bool> refreshing: false;
     callback pause-phone();
+    callback join-phone-hotspot();
     callback toggle-phone-tunnel();
     callback set-up-over-usb();
     callback open-files();
@@ -339,6 +343,15 @@ export component MainWindow inherits Window {
         // Actions.
         SectionTitle { text: "Actions"; }
         Card {
+            Tile {
+                icon: @image-url("icons/wifi.svg");
+                title: AppState.hotspot-busy ? "Connecting to phone hotspot…" : "Connect to phone hotspot";
+                subtitle: AppState.hotspot-status != "" ? AppState.hotspot-status : "Root phone only. Starts its hotspot and switches this PC's Wi-Fi network.";
+                clickable: true; enabled: AppState.linked && AppState.phone-root && !AppState.hotspot-busy && !AppState.busy;
+                clicked => { AppState.join-phone-hotspot(); }
+                Icon { source: @image-url("icons/chevron-right.svg"); }
+            }
+            Divider {}
             Tile {
                 icon: @image-url("icons/pause-circle.svg"); title: "Pause phone for banking"; subtitle: "USB debugging off for 15 minutes";
                 clickable: true; enabled: AppState.linked && !AppState.busy;

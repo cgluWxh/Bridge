@@ -106,6 +106,12 @@ final class BridgeController: ObservableObject {
     /// Reported by the phone over Bluetooth, so the Mac can say what works.
     @Published var phoneDaemonAlive = false
     @Published var phoneTunnelOn = false
+    @Published var phoneRootHelper = false
+    @Published var hotspotBusy = false
+    @Published var hotspotStatus = ""
+    private var hotspotRequest: String?
+    private var hotspotJoining = false
+    private let hotspotWiFi = HotspotWiFi()
 
     /// Keep mirroring notifications when the phone is out of Bluetooth range, by
     /// holding a tunnel open. Costs battery and data, so it's off by default.
@@ -828,6 +834,41 @@ final class BridgeController: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.refreshing = false }
     }
 
+    /// Explicit user action: changes this Mac's Wi-Fi network, not the mirroring transport.
+    func joinPhoneHotspot() {
+        guard bluetoothLinked, phoneRootHelper, !hotspotBusy else { return }
+        let id = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        hotspotRequest = id
+        hotspotJoining = false
+        hotspotBusy = true
+        hotspotStatus = "Checking Wi-Fi permission…"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 140) { [weak self] in
+            guard let self = self, self.hotspotRequest == id else { return }
+            self.finishHotspot(id, "Hotspot request timed out. Check the phone; its hotspot may still be on.")
+        }
+        hotspotWiFi.authorize { [weak self] allowed in
+            guard let self = self, self.hotspotRequest == id else { return }
+            guard allowed else {
+                self.finishHotspot(id, "Allow Bridge Location access in System Settings → Privacy & Security to connect to Wi-Fi.")
+                return
+            }
+            guard self.bluetoothLink.requestHotspot(id) else {
+                self.finishHotspot(id, "Bluetooth request failed. Reconnect and retry.")
+                return
+            }
+            self.hotspotStatus = "Starting phone hotspot; allow root access on the phone if asked…"
+        }
+    }
+
+    private func finishHotspot(_ id: String, _ message: String) {
+        guard hotspotRequest == id else { return }
+        hotspotRequest = nil
+        hotspotJoining = false
+        hotspotBusy = false
+        hotspotStatus = message
+        notice = message
+    }
+
     /// Menu action: switch the phone's tunnel on or off from here.
     func togglePhoneTunnel() {
         guard bluetoothLinked else {
@@ -1024,6 +1065,19 @@ final class BridgeController: ObservableObject {
                 self?.appendLog("Cached the icon for \(package).", source: "bluetooth")
             }
         }
+        bluetoothLink.onHotspot = { [weak self] id, credentials, error in
+            Task { @MainActor in
+                guard let self = self, self.hotspotRequest == id, !self.hotspotJoining else { return }
+                guard let credentials = credentials else {
+                    self.finishHotspot(id, error ?? "Phone hotspot unavailable.")
+                    return
+                }
+                self.hotspotJoining = true
+                self.hotspotStatus = "Joining phone hotspot…"
+                let failure = await self.background { HotspotWiFi.join(credentials) }
+                self.finishHotspot(id, failure ?? "Connected to phone hotspot. Turn it off in the phone's system settings when done.")
+            }
+        }
         bluetoothLink.onStatus = { [weak self] fields in
             Task { @MainActor in
                 guard let self = self else { return }
@@ -1031,6 +1085,7 @@ final class BridgeController: ObservableObject {
                 let daemon = fields["daemon"] == "1"
                 let tunnel = fields["tunnel"] == "1"
                 self.phoneDaemonAlive = daemon
+                self.phoneRootHelper = fields["root"] == "1"
                 self.phoneTunnelOn = tunnel
                 if let paused = fields["paused"] { self.phonePausedForBanking = paused == "1" }
                 if let b = fields["battery"].flatMap(Int.init), b >= 0 { self.phoneBattery = b }
@@ -1057,6 +1112,7 @@ final class BridgeController: ObservableObject {
                 self.bluetoothLinked = linked
                 if !linked {
                     self.phoneDaemonAlive = false; self.phoneTunnelOn = false
+                    self.phoneRootHelper = false
                     self.media = [:]; self.phoneBattery = nil
                 }
                 // Bluetooth covers both while it's in range, so the tunnel-based

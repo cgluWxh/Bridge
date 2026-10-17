@@ -88,6 +88,8 @@ class BleLink(private val context: Context) {
         const val TYPE_MEDIA: Byte = 9
         /** Album art for Now Playing: "<key>\t<base64 JPEG>". */
         const val TYPE_ART: Byte = 10
+        /** Directed hotspot reply; never broadcast or log its payload. */
+        const val TYPE_HOTSPOT: Byte = 11
 
         /** Conservative: the default ATT MTU is 23, of which 3 bytes are overhead. */
         private const val MIN_PAYLOAD = 20
@@ -436,6 +438,7 @@ class BleLink(private val context: Context) {
         send(
             TYPE_STATUS,
             "daemon=${if (daemon) 1 else 0}" +
+                " root=${if (Prefs.rootHelper(context)) 1 else 0}" +
                 " tunnel=${if (TunnelState.tunnelOn) 1 else 0}" +
                 " keep=${if (Prefs.keepReady(context)) 1 else 0}" +
                 " keepAt=${Prefs.keepReadyAt(context)}" +
@@ -808,6 +811,18 @@ class BleLink(private val context: Context) {
                 }
                 // "keep on at=<millis>" carries a timestamp, so it can't match exactly.
                 else -> when {
+                    message.startsWith("hotspot ") -> {
+                        val id = message.removePrefix("hotspot ").trim()
+                        if (id.matches(Regex("[a-f0-9]{32}"))) {
+                            Thread {
+                                val response = DaemonManager.startHotspot(context)
+                                // A reconnect is a different session, even for the same device.
+                                if (peers[peer.device] === peer && peer.verified && (!peer.plain || peer.crypto != null)) {
+                                    sendTo(peer, TYPE_HOTSPOT, "$id\t$response")
+                                }
+                            }.start()
+                        }
+                    }
                     message.startsWith("keep ") -> keepReady(message)
                     // "pause 15": USB debugging off for that many minutes, the
                     // same as the tunnel's PAUSE and the phone's own tile.

@@ -86,6 +86,9 @@ pub enum Event {
     OpenFiles,
     /// This PC's Bluetooth radio: Some(on) when known, None if it has none.
     Radio(Option<bool>),
+    /// Credentials have a redacted Debug implementation; never log the wire payload.
+    HotspotReply { id: String, credentials: Result<crate::hotspot::Credentials, String> },
+    HotspotJoined { id: String, result: Result<(), String> },
 }
 
 /// Watches this PC's Bluetooth radio, so the app can say "Bluetooth is off"
@@ -736,8 +739,35 @@ fn receive(bytes: &[u8], link: &Arc<Mutex<Link>>, events: &Sender<Event>, secret
         Kind::Status => {
             let _ = events.send(Event::Status(protocol::parse_status(&text)));
         }
+        Kind::Hotspot => {
+            if let Some(reply) = parse_hotspot_reply(&text) { let _ = events.send(reply); }
+        }
         Kind::Ping | Kind::Command | Kind::Auth => {}
     }
+}
+
+fn parse_hotspot_reply(text: &str) -> Option<Event> {
+    let fields: Vec<&str> = text.split('\t').collect();
+    let id = fields.first().copied().unwrap_or("");
+    if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+    let credentials = if fields.len() == 5 && fields[1] == "OK" {
+        (|| {
+            let ssid = String::from_utf8(base64_decode(fields[2]).map_err(|_| "Invalid hotspot reply")?)
+                .map_err(|_| "Invalid hotspot reply")?;
+            let password = String::from_utf8(base64_decode(fields[3]).map_err(|_| "Invalid hotspot reply")?)
+                .map_err(|_| "Invalid hotspot reply")?;
+            let c = crate::hotspot::Credentials { ssid, password, security: fields[4].into() };
+            if !c.validate() { return Err("Unsupported hotspot configuration".to_string()); }
+            Ok(c)
+        })()
+    } else {
+        // Malformed success payloads must not be copied into error messages.
+        let code = if fields.len() == 3 && fields[1] == "ERR" {
+            fields.get(2).filter(|c| c.len() <= 80 && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        } else { None };
+        Err(format!("Phone hotspot unavailable ({})", code.copied().unwrap_or("invalid_reply")))
+    };
+    Some(Event::HotspotReply { id: id.into(), credentials })
 }
 
 /// Standard base64, no dependency needed for one use.
@@ -769,4 +799,36 @@ pub fn describe(device: &BluetoothLEDevice) -> String {
 #[allow(dead_code)]
 fn hstring(s: &str) -> HSTRING {
     HSTRING::from(s)
+}
+
+#[cfg(test)]
+mod hotspot_tests {
+    use super::*;
+    const ID: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn directed_credentials_and_redacted_debug() {
+        let event = parse_hotspot_reply(&format!("{ID}\tOK\tUGhvbmU=\tc2VjcmV0MTIz\twpa2")).unwrap();
+        assert!(!format!("{event:?}").contains("secret123"));
+        match event {
+            Event::HotspotReply { id, credentials: Ok(c) } => {
+                assert_eq!(id, ID);
+                assert_eq!(c.ssid, "Phone");
+                assert_eq!(c.password, "secret123");
+                assert_eq!(c.security, "wpa2");
+            }
+            _ => panic!("expected credentials"),
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_requests_and_does_not_echo_malformed_secrets() {
+        assert!(parse_hotspot_reply("bad-id\tOK\tUGhvbmU=\tMTIzNDU2Nzg=\twpa2").is_none());
+        let event = parse_hotspot_reply(&format!("{ID}\tOK\tSECRET_VALUE")).unwrap();
+        assert!(!format!("{event:?}").contains("SECRET_VALUE"));
+        assert!(matches!(parse_hotspot_reply(&format!("{ID}\tOK\tUGhvbmU=\t\topen")),
+            Some(Event::HotspotReply { credentials: Ok(_), .. })));
+        assert!(matches!(parse_hotspot_reply(&format!("{ID}\tERR\troot_required")),
+            Some(Event::HotspotReply { credentials: Err(_), .. })));
+    }
 }

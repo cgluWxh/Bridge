@@ -46,6 +46,7 @@ final class BluetoothLink: NSObject {
     private static let typeMedia: UInt8 = 9
     /// Album art: "<key>\t<base64 JPEG>".
     private static let typeArt: UInt8 = 10
+    private static let typeHotspot: UInt8 = 11
 
     private var central: CBCentralManager?
     private var phone: CBPeripheral?
@@ -77,6 +78,8 @@ final class BluetoothLink: NSObject {
     var onMedia: (([String: String]) -> Void)?
     /// Album art: its key and JPEG bytes.
     var onArt: ((String, Data) -> Void)?
+    /// Directed response, correlated to a local request. Never log the wire payload.
+    var onHotspot: ((String, HotspotCredentials?, String?) -> Void)?
 
     /// True while the phone is connected and subscribed.
     private(set) var isLinked = false {
@@ -213,6 +216,12 @@ final class BluetoothLink: NSObject {
 
     /// Asks the phone for an app's icon, to show with its notifications.
     /// Comes back once as a small PNG and is cached for good.
+    func requestHotspot(_ id: String) -> Bool {
+        guard verified, isLinked else { return false }
+        send(type: Self.typeCommand, text: "hotspot \(id)")
+        return true
+    }
+
     func requestIcon(_ package: String) {
         send(type: Self.typeCommand, text: "icon \(package)")
     }
@@ -348,6 +357,22 @@ final class BluetoothLink: NSObject {
             let parts = text.split(separator: "\t", maxSplits: 1)
             if parts.count == 2, let png = Data(base64Encoded: String(parts[1])) {
                 onIcon?(String(parts[0]), png)
+            }
+        case Self.typeHotspot:
+            let fields = text.components(separatedBy: "\t")
+            guard let id = fields.first, id.count == 32,
+                  id.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return }
+            if fields.count == 5, fields[1] == "OK",
+               let ssidBytes = Data(base64Encoded: fields[2]), let passwordBytes = Data(base64Encoded: fields[3]),
+               let ssid = String(data: ssidBytes, encoding: .utf8), let password = String(data: passwordBytes, encoding: .utf8) {
+                let credentials = HotspotCredentials(ssid: ssid, password: password, security: fields[4])
+                if credentials.isValid { onHotspot?(id, credentials, nil) }
+                else { onHotspot?(id, nil, "Unsupported phone hotspot configuration.") }
+            } else {
+                let code = fields.count == 3 && fields[1] == "ERR" && fields[2].count <= 80 &&
+                    fields[2].utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 95 })
+                    ? fields[2] : "invalid_reply"
+                onHotspot?(id, nil, "Phone hotspot unavailable (\(code)).")
             }
         case Self.typeStatus:
             let fields = Dictionary(uniqueKeysWithValues: text.split(separator: " ").compactMap { field -> (String, String)? in

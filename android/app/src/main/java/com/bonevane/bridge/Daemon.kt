@@ -156,6 +156,11 @@ object Daemon {
                 install(s, rest.trim().toLongOrNull() ?: 0)
             }
 
+            "HOTSPOT" -> {
+                // Contains credentials: never log this response.
+                reply(s, RootHotspot.start())
+            }
+
             "QUIT" -> {
                 log("quit requested")
                 endSessions(s, respond = false)

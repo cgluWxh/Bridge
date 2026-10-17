@@ -110,6 +110,26 @@ object DaemonManager {
             }
         }.getOrElse { "couldn't reach the helper: ${it.message}" }
 
+    /** Credentials travel only to the requesting BLE peer. Never log the return value. */
+    fun startHotspot(ctx: Context): String {
+        if (!Prefs.rootHelper(ctx)) return "ERR\troot_required"
+        if (Prefs.pausedUntil(ctx) > System.currentTimeMillis()) return "ERR\tphone_paused"
+        return runCatching {
+            start(ctx) // Root path only; does not turn on ADB.
+            Socket().use { s ->
+                s.connect(InetSocketAddress("127.0.0.1", DAEMON_PORT), 1000)
+                s.soTimeout = 25_000
+                s.getOutputStream().write((Pairing.authLine(ctx) + "\nHOTSPOT\n").toByteArray())
+                s.getOutputStream().flush()
+                val input = s.getInputStream().bufferedReader()
+                val hello = input.readLine()
+                check(hello?.startsWith("bridge-daemon uid=0 ") == true)
+                input.readLine()?.takeIf { it.startsWith("OK\t") || it.startsWith("ERR\t") }
+                    ?: "ERR\thelper_protocol"
+            }
+        }.getOrElse { "ERR\troot_helper_unavailable" }
+    }
+
     /** Blocking; call from a background thread. Throws with a readable message on failure. */
     @Synchronized
     fun start(ctx: Context) {

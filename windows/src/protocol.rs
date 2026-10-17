@@ -26,6 +26,8 @@ pub enum Kind {
     Media = 9,
     /// Album art: "<key>\t<base64 JPEG>".
     Art = 10,
+    /// Directed, credential-bearing hotspot response. Never log its payload.
+    Hotspot = 11,
 }
 
 impl Kind {
@@ -41,6 +43,7 @@ impl Kind {
             8 => Kind::Removed,
             9 => Kind::Media,
             10 => Kind::Art,
+            11 => Kind::Hotspot,
             _ => return None,
         })
     }

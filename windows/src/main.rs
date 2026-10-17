@@ -18,6 +18,7 @@ mod audio;
 mod ble;
 mod clipboard;
 mod files;
+mod hotspot;
 mod log;
 mod notify;
 mod protocol;
@@ -116,6 +117,9 @@ struct App {
     /// The phone's last status report (battery, network, mode, model…).
     phone_status: std::collections::HashMap<String, String>,
     usb_busy: bool,
+    hotspot_pending: Option<String>,
+    hotspot_joining: bool,
+    hotspot_status: String,
     /// The last failure (title, detail, from USB setup?). Stays on the hero
     /// card until the next action, so a heartbeat can't wipe it before it's read.
     error: Option<(String, String, bool)>,
@@ -173,6 +177,9 @@ impl App {
             session_ping_at: Instant::now(),
             session_ping_misses: 0,
             usb_busy: false,
+            hotspot_pending: None,
+            hotspot_joining: false,
+            hotspot_status: String::new(),
             error: None,
             icons_requested: BTreeSet::new(),
         }
@@ -201,6 +208,9 @@ impl App {
         ui.set_searching(self.searching);
         ui.set_phone_tunnel_on(self.phone_tunnel_on);
         ui.set_phone_paused(self.phone_paused);
+        ui.set_phone_root(self.phone_status.get("root").map(String::as_str) == Some("1"));
+        ui.set_hotspot_busy(self.hotspot_pending.is_some());
+        ui.set_hotspot_status(self.hotspot_status.clone().into());
         ui.set_mirroring(self.mirroring);
         ui.set_version(VERSION.into());
         // The phone in the top bar, while it's linked.
@@ -662,6 +672,29 @@ impl App {
             let _ = b.send_command(if on { "tunnel on" } else { "tunnel off" });
             self.log("bluetooth", if on { "asked the phone to start its tunnel" } else { "asked the phone to stop its tunnel" });
         }
+    }
+
+    fn join_phone_hotspot(&mut self) {
+        if !self.linked || self.hotspot_pending.is_some() { return; }
+        if self.phone_status.get("root").map(String::as_str) != Some("1") {
+            self.hotspot_status = "Enable Root helper on the phone first".into();
+            self.refresh();
+            return;
+        }
+        let id = protocol::nonce();
+        if self.ble.as_ref().map(|b| b.send_command(&format!("hotspot {id}")).is_ok()) != Some(true) {
+            self.hotspot_status = "Bluetooth request failed; reconnect and retry".into();
+            self.refresh();
+            return;
+        }
+        self.hotspot_pending = Some(id.clone());
+        self.hotspot_joining = false;
+        self.hotspot_status = "Starting phone hotspot; allow root access on the phone if asked…".into();
+        let tx = self.events_tx.clone();
+        Timer::single_shot(Duration::from_secs(140), move || {
+            let _ = tx.send(Event::HotspotJoined { id, result: Err("Hotspot request timed out; check the phone. Its hotspot may still be on".into()) });
+        });
+        self.refresh();
     }
 
     fn pause_phone(&mut self) {
@@ -1134,6 +1167,33 @@ impl App {
 
     fn handle(&mut self, event: Event) {
         match event {
+            Event::HotspotReply { id, credentials } => {
+                if self.hotspot_pending.as_deref() != Some(id.as_str()) || self.hotspot_joining { return; }
+                match credentials {
+                    Ok(credentials) => {
+                        self.hotspot_joining = true;
+                        self.hotspot_status = "Joining phone hotspot…".into();
+                        let tx = self.events_tx.clone();
+                        std::thread::spawn(move || {
+                            let result = hotspot::join(credentials);
+                            let _ = tx.send(Event::HotspotJoined { id, result });
+                        });
+                    }
+                    Err(why) => {
+                        self.hotspot_pending = None;
+                        self.hotspot_status = why;
+                    }
+                }
+            }
+            Event::HotspotJoined { id, result } => {
+                if self.hotspot_pending.as_deref() != Some(id.as_str()) { return; }
+                self.hotspot_pending = None;
+                self.hotspot_joining = false;
+                self.hotspot_status = match result {
+                    Ok(()) => "Connected to phone hotspot. Turn it off in the phone's system settings when done".into(),
+                    Err(why) => why,
+                };
+            }
             Event::Searching => {
                 self.linked = false;
                 self.searching = true;
@@ -1609,6 +1669,8 @@ fn main() {
         });
         let a = app.clone();
         ui.on_pause_phone(move || a.borrow_mut().pause_phone());
+        let a = app.clone();
+        ui.on_join_phone_hotspot(move || a.borrow_mut().join_phone_hotspot());
         let a = app.clone();
         ui.on_toggle_phone_tunnel(move || a.borrow_mut().toggle_phone_tunnel());
         let a = app.clone();

@@ -55,6 +55,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHumanReadableCopyright</key><string>© 2026 Bonevane</string>
+    <key>NSLocationUsageDescription</key>
+    <string>Bridge needs Wi-Fi scan access to connect this Mac to your phone's hotspot. It does not request or store your location.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Bridge needs Wi-Fi scan access to connect this Mac to your phone's hotspot. It does not request or store your location.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>Bridge uses Bluetooth for the short-range link to your phone, so notifications and the clipboard don't need an internet connection.</string>
 </dict>

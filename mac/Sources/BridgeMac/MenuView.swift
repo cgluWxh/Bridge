@@ -187,6 +187,16 @@ struct MenuView: View {
             }
             .disabled(bridge.isBusy)
 
+            MenuRow(bridge.hotspotBusy ? "Connecting to Phone Hotspot…" : "Connect to Phone Hotspot",
+                    systemImage: "wifi", help: "Root phone only. Starts its hotspot and switches this Mac's Wi-Fi network.") {
+                bridge.joinPhoneHotspot()
+            }
+            .disabled(!bridge.bluetoothLinked || !bridge.phoneRootHelper || bridge.hotspotBusy || bridge.isBusy)
+            if !bridge.hotspotStatus.isEmpty {
+                Text(bridge.hotspotStatus).font(.caption).foregroundStyle(.secondary)
+                    .padding(.horizontal, 12).padding(.vertical, 4)
+            }
+
             if bridge.bluetoothLinked {
                 MenuRow(bridge.phoneTunnelOn ? "Turn Phone Tunnel Off" : "Turn Phone Tunnel On",
                         systemImage: bridge.phoneTunnelOn ? "globe.badge.chevron.backward" : "globe",
