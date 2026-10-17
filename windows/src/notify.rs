@@ -54,6 +54,56 @@ pub fn show(app: &str, title: &str, body: &str) {
     }
 }
 
+/// Keep local transfer callbacks alive separately from mirrored notifications,
+/// so dismissing a file toast never dismisses a notification on the phone.
+static RECEIVED: Mutex<std::collections::VecDeque<ToastNotification>> = Mutex::new(std::collections::VecDeque::new());
+
+/// One summary per completed batch. Capture the actual saved path, not a path
+/// supplied through toast arguments (and not the original collision-prone name).
+pub fn show_received(report: &crate::incoming::Report, events: Sender<Event>) {
+    let Some(first) = report.saved.first() else { return };
+    let target = first.clone();
+    let name = first.file_name().unwrap_or_default().to_string_lossy();
+    let title = if report.saved.len() == 1 { "File received".to_string() }
+        else { format!("{} files received", report.saved.len()) };
+    let body = if report.saved.len() == 1 { name.into_owned() }
+        else { format!("{name} and {} more files", report.saved.len() - 1) };
+    let failures = if report.failed == 0 { String::new() } else { format!(" · {} failed", report.failed) };
+    let hint = if report.saved.len() == 1 { "Click to show the file." } else { "Click to show the first file." };
+    let xml = format!(
+        r#"<toast><visual><binding template="ToastGeneric"><text>Bridge · {}</text><text>{}</text><text>Saved to Downloads{}. {hint}</text></binding></visual><actions><action content="Show in folder" arguments="reveal" activationType="foreground"/></actions></toast>"#,
+        escape(&title), escape(&body), escape(&failures)
+    );
+    let result = (|| -> windows::core::Result<()> {
+        let doc = XmlDocument::new()?;
+        doc.LoadXml(&HSTRING::from(xml))?;
+        let toast = ToastNotification::CreateToastNotification(&doc)?;
+        toast.Activated(&TypedEventHandler::new(move |_: &Option<ToastNotification>, _: &Option<windows::core::IInspectable>| {
+            let _ = events.send(Event::RevealReceived(target.clone()));
+            Ok(())
+        }))?;
+        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_ID))?.Show(&toast)?;
+        let mut shown = RECEIVED.lock().unwrap();
+        shown.push_back(toast);
+        while shown.len() > 100 { shown.pop_front(); }
+        Ok(())
+    })();
+    if let Err(e) = result { crate::log!("notify", "file toast failed: {e}"); }
+}
+
+/// Open Explorer and select, never open/execute the received file itself.
+/// Separate arguments avoid shell interpretation of spaces and metacharacters.
+pub fn reveal_received(path: &std::path::Path) -> std::io::Result<()> {
+    let mut command = std::process::Command::new("explorer.exe");
+    if path.is_file() {
+        command.arg("/select,").arg(path);
+    } else {
+        command.arg(path.parent().filter(|p| p.is_dir()).map(|p| p.to_path_buf())
+            .unwrap_or_else(crate::files::downloads_dir));
+    }
+    command.spawn().map(|_| ())
+}
+
 /// One phone notification. With `id`, the same id replaces the toast (a chat's
 /// next message), "reply" puts a text box on it when the app supports replies,
 /// and swiping it away dismisses it on the phone.
@@ -95,15 +145,14 @@ fn deliver(xml: &str, id: Option<u32>, events: Option<Sender<Event>>) -> windows
     let doc = XmlDocument::new()?;
     doc.LoadXml(&HSTRING::from(xml))?;
     let toast = ToastNotification::CreateToastNotification(&doc)?;
-    if let (Some(id), Some(events)) = (id, events) {
-        toast.SetTag(&HSTRING::from(id.to_string()))?;
-        toast.SetGroup(&HSTRING::from(GROUP))?;
-
-        let tx = events.clone();
+    let untagged_phone = id.is_none() && events.is_some();
+    if let Some(tx) = events.clone() {
         toast.Activated(&TypedEventHandler::new(move |_: &Option<ToastNotification>, args: &Option<windows::core::IInspectable>| {
             let Some(args) = args else { return Ok(()) };
             let Ok(args) = args.cast::<ToastActivatedEventArgs>() else { return Ok(()) };
-            if args.Arguments()?.to_string() == "reply" {
+            let action = args.Arguments()?.to_string();
+            if action == "reply" {
+                let Some(id) = id else { return Ok(()) };
                 let text = args
                     .UserInput()
                     .and_then(|input| input.Lookup(&HSTRING::from("reply")))
@@ -114,10 +163,16 @@ fn deliver(xml: &str, id: Option<u32>, events: Option<Sender<Event>>) -> windows
                 if !text.trim().is_empty() {
                     let _ = tx.send(Event::ToastReply { id, text });
                 }
+            } else if action.is_empty() {
+                // Only the body click: replying never starts a mirror session.
+                let _ = tx.send(Event::NotificationClicked);
             }
             Ok(())
         }))?;
-
+    }
+    if let (Some(id), Some(events)) = (id, events) {
+        toast.SetTag(&HSTRING::from(id.to_string()))?;
+        toast.SetGroup(&HSTRING::from(GROUP))?;
         let tx = events;
         toast.Dismissed(&TypedEventHandler::new(move |_: &Option<ToastNotification>, args: &Option<ToastDismissedEventArgs>| {
             // Only the user swiping it away counts; timing out into Action
@@ -144,6 +199,13 @@ fn deliver(xml: &str, id: Option<u32>, events: Option<Sender<Event>>) -> windows
                 map.remove(&old);
             }
         }
+    }
+    if untagged_phone {
+        // Even a phone notification without an Android id has a clickable body.
+        static UNTAGGED: Mutex<std::collections::VecDeque<ToastNotification>> = Mutex::new(std::collections::VecDeque::new());
+        let mut shown = UNTAGGED.lock().unwrap();
+        shown.push_back(toast.clone());
+        while shown.len() > 100 { shown.pop_front(); }
     }
     ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_ID))?.Show(&toast)?;
     Ok(())

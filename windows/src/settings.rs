@@ -8,6 +8,8 @@ pub struct Settings {
     pub launch_at_login: bool,
     pub use_bluetooth: bool,
     pub mirror_notifications: bool,
+    /// Clicking the body of a phone toast starts or shows mirroring.
+    pub open_mirroring_on_notification: bool,
     pub notifications_anywhere: bool,
     pub sync_clipboard: bool,
     pub background_clipboard: bool,
@@ -29,6 +31,7 @@ impl Default for Settings {
             launch_at_login: false,
             use_bluetooth: true,
             mirror_notifications: true,
+            open_mirroring_on_notification: false,
             notifications_anywhere: false,
             sync_clipboard: true,
             background_clipboard: false,
@@ -64,6 +67,7 @@ impl Settings {
                 "launch_at_login" => s.launch_at_login = b,
                 "use_bluetooth" => s.use_bluetooth = b,
                 "mirror_notifications" => s.mirror_notifications = b,
+                "open_mirroring_on_notification" => s.open_mirroring_on_notification = b,
                 "notifications_anywhere" => s.notifications_anywhere = b,
                 "sync_clipboard" => s.sync_clipboard = b,
                 "background_clipboard" => s.background_clipboard = b,
@@ -83,10 +87,11 @@ impl Settings {
     pub fn save(&self) {
         let _ = std::fs::create_dir_all(crate::store::data_dir());
         let text = format!(
-            "{{\n  \"launch_at_login\": {},\n  \"use_bluetooth\": {},\n  \"mirror_notifications\": {},\n  \"notifications_anywhere\": {},\n  \"sync_clipboard\": {},\n  \"background_clipboard\": {},\n  \"keep_ready\": {},\n  \"keep_ready_changed_at\": {},\n  \"max_size\": {},\n  \"bitrate_mbps\": {},\n  \"turn_screen_off\": {},\n  \"mute_phone\": {},\n  \"sync_dismiss\": {}\n}}\n",
+            "{{\n  \"launch_at_login\": {},\n  \"use_bluetooth\": {},\n  \"mirror_notifications\": {},\n  \"notifications_anywhere\": {},\n  \"sync_clipboard\": {},\n  \"background_clipboard\": {},\n  \"keep_ready\": {},\n  \"keep_ready_changed_at\": {},\n  \"max_size\": {},\n  \"bitrate_mbps\": {},\n  \"turn_screen_off\": {},\n  \"mute_phone\": {},\n  \"sync_dismiss\": {},\n  \"open_mirroring_on_notification\": {}\n}}\n",
             self.launch_at_login, self.use_bluetooth, self.mirror_notifications, self.notifications_anywhere,
             self.sync_clipboard, self.background_clipboard, self.keep_ready, self.keep_ready_changed_at,
-            self.max_size, self.bitrate_mbps, self.turn_screen_off, self.mute_phone, self.sync_dismiss
+            self.max_size, self.bitrate_mbps, self.turn_screen_off, self.mute_phone, self.sync_dismiss,
+            self.open_mirroring_on_notification
         );
         let _ = std::fs::write(path(), text);
         apply_launch_at_login(self.launch_at_login);

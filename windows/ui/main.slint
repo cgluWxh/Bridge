@@ -83,6 +83,7 @@ export global SettingsState {
     in-out property <bool> launch-at-login;
     in-out property <bool> use-bluetooth;
     in-out property <bool> mirror-notifications;
+    in-out property <bool> open-mirroring-on-notification;
     in-out property <bool> notifications-anywhere;
     in-out property <bool> sync-clipboard;
     in-out property <bool> background-clipboard;
@@ -113,7 +114,7 @@ component CapabilityTile inherits Tile {
     subtitle: cap.detail;
     Rectangle {
         width: 10px; height: 10px; border-radius: 5px;
-       
+
         background: cap.state == 2 ? Theme.good : cap.state == 1 ? Theme.warn : Theme.outline;
     }
 }
@@ -515,6 +516,8 @@ export component SettingsWindow inherits Window {
                     SettingRow { icon: @image-url("icons/globe.svg"); title: "Also over the internet"; subtitle: "When the phone is out of Bluetooth range. Mac only for now: coming to Windows"; checked <=> SettingsState.notifications-anywhere; switch-enabled: false; toggled => { SettingsState.changed(); } }
                     Divider {}
                     SettingRow { icon: @image-url("icons/check.svg"); title: "Clear on both sides"; subtitle: "Dismissing a notification here clears it on the phone, and clearing it on the phone takes it off this PC"; checked <=> SettingsState.sync-dismiss; switch-enabled: SettingsState.mirror-notifications; toggled => { SettingsState.changed(); } }
+                    Divider {}
+                    SettingRow { icon: @image-url("icons/monitor.svg"); title: "Open mirroring when a phone notification is clicked"; subtitle: "Click the notification body to start or show the phone screen. Replies and file notifications keep their own actions."; checked <=> SettingsState.open-mirroring-on-notification; switch-enabled: SettingsState.mirror-notifications; toggled => { SettingsState.changed(); } }
                 }
                 SectionTitle { text: "Clipboard"; }
                 Card {

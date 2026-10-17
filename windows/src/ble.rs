@@ -61,6 +61,8 @@ pub enum Event {
     /// From a toast (notify.rs): reply typed, or swiped away.
     ToastReply { id: u32, text: String },
     ToastDismissed(u32),
+    /// Body click on a mirrored phone toast (not a reply or file notification).
+    NotificationClicked,
     /// An app icon the phone sent: package and PNG bytes.
     Icon { package: String, png: Vec<u8> },
     Clipboard(String),
@@ -76,7 +78,9 @@ pub enum Event {
     FileProgress(String, f32),
     FileDone(Result<String, String>),
     ShareOffer(String),
-    ShareFinished(Result<String, String>),
+    ShareFinished(Result<crate::incoming::Report, String>),
+    /// A local transfer toast was clicked; never executes the received file.
+    RevealReceived(std::path::PathBuf),
     /// The phone is paired (bonded) in Windows' Bluetooth settings, which
     /// breaks the link: Bridge connects unpaired, and encrypts by itself.
     PairedInWindows { name: String, address: u64 },

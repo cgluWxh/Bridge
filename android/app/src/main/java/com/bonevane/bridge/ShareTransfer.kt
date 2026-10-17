@@ -20,14 +20,63 @@ object ShareTransfer {
         val state: String = "Queued",
         val size: Long = 0,
         val sent: Long = 0,
-    )
+    ) {
+        val fraction get() = ShareTransfer.fraction(sent, size, state == "Sent" || state == "Saving")
+    }
+
+    fun fraction(
+        done: Long,
+        total: Long,
+        emptyComplete: Boolean = false,
+    ): Double =
+        if (total > 0) {
+            (done.toDouble() / total).coerceIn(0.0, 1.0)
+        } else if (emptyComplete) {
+            1.0
+        } else {
+            0.0
+        }
+
+    fun humanBytes(bytes: Double): String {
+        val units = arrayOf("B", "KB", "MB", "GB", "TB")
+        var value = if (bytes.isFinite()) bytes.coerceAtLeast(0.0) else 0.0
+        var unit = 0
+        while (value >= 1000 && unit < units.lastIndex) {
+            value /= 1000
+            unit++
+        }
+        return String.format(java.util.Locale.getDefault(), if (unit == 0) "%.0f %s" else "%.1f %s", value, units[unit])
+    }
+
+    fun percent(fraction: Double): String = String.format(java.util.Locale.getDefault(), "%.1f%%", fraction.coerceIn(0.0, 1.0) * 100)
 
     data class Snapshot(
         val active: Boolean,
         val peer: String,
         val phase: String,
         val items: List<Item>,
+        val bytesPerSecond: Double = 0.0,
+        val speedUpdatedAt: Long = 0,
     ) {
+        val prepared get() = items.isNotEmpty() && items.none { it.state == "Queued" || it.state == "Preparing" }
+        val totalBytes get() = items.sumOf { it.size }
+        val sentBytes get() = items.sumOf { it.sent }
+        val overallFraction get() =
+            if (totalBytes > 0) {
+                fraction(sentBytes, totalBytes)
+            } else if (items.isEmpty()) {
+                0.0
+            } else {
+                items.count { it.state == "Sent" || it.state == "Saving" }.toDouble() / items.size
+            }
+        val overallProgress get() = "${humanBytes(
+            sentBytes.toDouble(),
+        )} / ${humanBytes(totalBytes.toDouble())} · ${percent(overallFraction)}"
+
+        // A recent sampling interval, not the average since the batch began.
+        // Stop showing stale speed if the connection stalls or waits for a disk ACK.
+        val currentBytesPerSecond get() = if (active && SystemClock.elapsedRealtime() - speedUpdatedAt < 1500) bytesPerSecond else 0.0
+        val currentItem get() = items.firstOrNull { it.state == "Sending" || it.state == "Saving" }
         val succeeded get() = items.count { it.state == "Sent" }
         val failed get() = items.count { it.state.startsWith("Failed:") }
         val summary get() = "$succeeded succeeded · $failed failed · ${items.size} files"
@@ -61,8 +110,16 @@ object ShareTransfer {
         owner: ShareService,
         index: Int,
         value: Item,
+        bytesPerSecond: Double? = null,
     ) {
-        if (service === owner) snapshot = snapshot.copy(items = snapshot.items.toMutableList().also { it[index] = value })
+        if (service === owner) {
+            snapshot =
+                snapshot.copy(
+                    items = snapshot.items.toMutableList().also { it[index] = value },
+                    bytesPerSecond = bytesPerSecond ?: snapshot.bytesPerSecond,
+                    speedUpdatedAt = if (bytesPerSecond != null) SystemClock.elapsedRealtime() else snapshot.speedUpdatedAt,
+                )
+        }
     }
 
     @Synchronized fun finish(
@@ -74,6 +131,7 @@ object ShareTransfer {
             snapshot.copy(
                 active = false,
                 phase = reason,
+                bytesPerSecond = 0.0,
                 items =
                     snapshot.items.map {
                         if (it.state == "Sent" || it.state.startsWith("Failed:")) {
@@ -166,8 +224,15 @@ class ShareService : Service() {
 
     private fun notification(): Notification {
         val state = ShareTransfer.snapshot
-        val total = state.items.sumOf { it.size }
-        val done = state.items.sumOf { it.sent }
+        val progress =
+            buildString {
+                append(state.phase)
+                if (state.prepared) {
+                    append("\nOverall: ${state.overallProgress} · ${ShareTransfer.humanBytes(state.currentBytesPerSecond)}/s")
+                    state.currentItem?.let { append("\nFile: ${ShareTransfer.percent(it.fraction)}") }
+                }
+                append("\n${state.summary}")
+            }
         val open =
             PendingIntent.getActivity(
                 this,
@@ -180,13 +245,39 @@ class ShareService : Service() {
                 .Builder(this, CHANNEL)
                 .setSmallIcon(R.drawable.ic_stat_bridge)
                 .setContentTitle(if (state.active) "Sharing to ${state.peer}" else "File sharing finished")
-                .setContentText("${state.phase} · ${state.summary}")
-                .setStyle(Notification.BigTextStyle().bigText("${state.phase}\n${state.summary}"))
+                .setContentText(
+                    if (state.prepared) {
+                        "${state.overallProgress} · ${ShareTransfer.humanBytes(
+                            state.currentBytesPerSecond,
+                        )}/s"
+                    } else {
+                        state.phase
+                    },
+                ).setStyle(Notification.BigTextStyle().bigText(progress))
                 .setContentIntent(open)
                 .setOnlyAlertOnce(true)
                 .setOngoing(state.active)
-        if (state.active) builder.setProgress(1000, if (total == 0L) 0 else (done.toDouble() / total * 1000).toInt(), total == 0L)
+        if (state.active) builder.setProgress(1000, (state.overallFraction * 1000).toInt(), !state.prepared)
         return builder.build()
+    }
+
+    /** Legacy file:// intents must not turn this exported activity into a reader
+     * of Bridge's own private files. Prefer caller-granted content:// URIs.
+     */
+    private fun localSharedFile(uri: Uri): File? {
+        if (uri.scheme == "content") return null
+        require(uri.scheme == "file") { "Only file or content URIs are supported" }
+        val file = File(requireNotNull(uri.path) { "Missing file path" }).canonicalFile
+        val roots = getSystemService(android.os.storage.StorageManager::class.java)
+            .storageVolumes.mapNotNull { it.directory?.canonicalFile }
+        require(roots.any { root ->
+            val prefix = root.path + File.separator
+            file.path.startsWith(prefix) &&
+                !file.path.startsWith(prefix + "Android/data/") &&
+                !file.path.startsWith(prefix + "Android/obb/")
+        }) { "Use a content URI with read permission for this file" }
+        require(file.isFile && file.canRead()) { "File is not readable; ask the file manager to grant read access" }
+        return file
     }
 
     private fun runBatch(
@@ -212,13 +303,17 @@ class ShareService : Service() {
                 var name = "File ${index + 1}"
                 val file = File(staging, index.toString())
                 try {
-                    require(uri.scheme == "content") { "Only content URIs are supported" }
-                    contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
-                        if (it.moveToFirst()) name = it.getString(0)?.take(240)?.ifBlank { name } ?: name
+                    val local = localSharedFile(uri)
+                    if (local != null) {
+                        name = local.name.take(240).ifBlank { name }
+                    } else {
+                        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                            if (it.moveToFirst()) name = it.getString(0)?.take(240)?.ifBlank { name } ?: name
+                        }
                     }
                     ShareTransfer.phase(this, "Preparing ${index + 1}/${uris.size}: $name")
                     ShareTransfer.item(this, index, ShareTransfer.Item(name, "Preparing"))
-                    contentResolver.openInputStream(uri)?.use { input ->
+                    (local?.inputStream() ?: contentResolver.openInputStream(uri))?.use { input ->
                         source = input
                         file.outputStream().use { out ->
                             val buf = ByteArray(128 * 1024)
@@ -328,7 +423,9 @@ class ShareService : Service() {
                     return@forEachIndexed
                 }
                 var sent = 0L
-                var last = 0L
+                var last = SystemClock.elapsedRealtime()
+                var lastSent = 0L
+                ShareTransfer.item(this, index, item.copy(state = "Sending"), bytesPerSecond = 0.0)
                 file.inputStream().use { source ->
                     val buf = ByteArray(128 * 1024)
                     while (sent < item.size) {
@@ -337,14 +434,18 @@ class ShareService : Service() {
                         check(n > 0) { "Source ended early" }
                         output.write(buf, 0, n)
                         sent += n
-                        lastProgress = SystemClock.elapsedRealtime()
-                        if (SystemClock.elapsedRealtime() - last > 250) {
-                            ShareTransfer.item(this, index, item.copy(state = "Sending", sent = sent))
-                            last = SystemClock.elapsedRealtime()
+                        val now = SystemClock.elapsedRealtime()
+                        lastProgress = now
+                        if (now - last >= 250) {
+                            val speed = (sent - lastSent).toDouble() * 1000 / (now - last)
+                            ShareTransfer.item(this, index, item.copy(state = "Sending", sent = sent), bytesPerSecond = speed)
+                            last = now
+                            lastSent = sent
                         }
                     }
                     output.flush()
                 }
+                ShareTransfer.item(this, index, item.copy(state = "Saving", sent = sent), bytesPerSecond = 0.0)
                 val ack = reply()
                 ShareTransfer.item(
                     this,

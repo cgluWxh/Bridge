@@ -307,6 +307,7 @@ impl App {
         st.set_launch_at_login(self.settings.launch_at_login);
         st.set_use_bluetooth(self.settings.use_bluetooth);
         st.set_mirror_notifications(self.settings.mirror_notifications);
+        st.set_open_mirroring_on_notification(self.settings.open_mirroring_on_notification);
         st.set_notifications_anywhere(self.settings.notifications_anywhere);
         st.set_sync_clipboard(self.settings.sync_clipboard);
         st.set_background_clipboard(self.settings.background_clipboard);
@@ -328,6 +329,7 @@ impl App {
         self.settings.launch_at_login = st.get_launch_at_login();
         self.settings.use_bluetooth = st.get_use_bluetooth();
         self.settings.mirror_notifications = st.get_mirror_notifications();
+        self.settings.open_mirroring_on_notification = st.get_open_mirroring_on_notification();
         self.settings.notifications_anywhere = st.get_notifications_anywhere();
         self.settings.sync_clipboard = st.get_sync_clipboard();
         self.settings.background_clipboard = st.get_background_clipboard();
@@ -746,6 +748,32 @@ impl App {
                 self.log("bluetooth", "waking the phone's tunnel");
             }
         }
+    }
+
+    /// User clicked a phone toast. Check the live setting so existing toasts
+    /// follow a switch change too; never restart an already-running connection.
+    fn mirror_from_notification(&mut self) {
+        if !self.settings.open_mirroring_on_notification || !self.settings.mirror_notifications {
+            return;
+        }
+        if let Some(window) = &self.mirror_window {
+            window.window().set_minimized(false);
+            let _ = window.show();
+            return;
+        }
+        if !self.creds.is_paired() || self.usb_busy {
+            self.log("notify", "can't open mirroring: pairing/setup is not ready");
+            let _ = self.window.show();
+            return;
+        }
+        if self.connecting {
+            // Promote an in-flight files-only START without creating a second tunnel.
+            self.connect_for_files = false;
+            return;
+        }
+        self.log("notify", "phone notification clicked: opening mirroring");
+        self.connect();
+        if self.error.is_some() { let _ = self.window.show(); }
     }
 
     /// Mirror Phone: wake the tunnel if needed, connect, START.
@@ -1207,13 +1235,22 @@ impl App {
             }
             Event::ShareFinished(result) => {
                 match result {
-                    Ok(text) => self.log("files", &text),
+                    Ok(report) => {
+                        self.log("files", &format!("Phone share: {} succeeded, {} failed · Downloads", report.succeeded, report.failed));
+                        notify::show_received(&report, self.events_tx.clone());
+                    }
                     Err(text) => {
                         self.log("files", &text);
                         self.error = Some(("Couldn't receive files".into(), text, false));
                     }
                 }
                 self.refresh();
+            }
+            Event::RevealReceived(path) => {
+                if let Err(e) = notify::reveal_received(&path) {
+                    self.log("files", &format!("Couldn't show received file: {e}"));
+                    notify::show("Bridge", "Couldn't open File Explorer", &e.to_string());
+                }
             }
             Event::HotspotReply { id, credentials } => {
                 if self.hotspot_pending.as_deref() != Some(id.as_str()) || self.hotspot_joining { return; }
@@ -1312,6 +1349,7 @@ impl App {
                     }
                 }
             }
+            Event::NotificationClicked => self.mirror_from_notification(),
             Event::ToastDismissed(id) => {
                 if !self.settings.sync_dismiss {
                     return;
@@ -1533,6 +1571,12 @@ impl App {
                         self.mirroring = true;
                         self.connecting = false;
                         self.window.global::<AppState>().set_busy(false);
+                        // A toast may have promoted a files-only connection;
+                        // satisfy that window's pending listing as well.
+                        if self.files_window.get_loading() {
+                            let path = self.files_path.clone();
+                            self.list_files(&path);
+                        }
                     }
                     Err(e) => {
                         self.log("", &format!("couldn't connect: {e}"));

@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct Report {
     pub succeeded: usize,
     pub failed: usize,
+    /// Actual committed names, including collision suffixes, for Explorer selection.
+    pub saved: Vec<PathBuf>,
 }
 
 fn line(s: &mut (impl Read + Write)) -> std::io::Result<String> {
@@ -79,7 +81,7 @@ impl Pending {
         }
         Err(std::io::Error::other("could not allocate temporary file"))
     }
-    fn commit(&mut self, dir: &Path, name: &str) -> std::io::Result<()> {
+    fn commit(&mut self, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
         self.file.as_ref().unwrap().sync_all()?;
         drop(self.file.take());
         let p = Path::new(name);
@@ -90,7 +92,7 @@ impl Pending {
             // Never replace an existing target, even when concurrent transfers
             // choose the same filename between preflight and commit.
             match publish(&self.path, &target) {
-                Ok(()) => return Ok(()),
+                Ok(()) => return Ok(target),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(e),
             }
@@ -136,7 +138,9 @@ pub fn receive(s: &mut (impl Read + Write), dir: &Path) -> std::io::Result<Repor
             left -= want as u64;
         }
         // Drain even on disk-full to preserve the next file's framing.
-        if !write_error && pending.commit(dir, &name).is_ok() {
+        let committed = if write_error { None } else { pending.commit(dir, &name).ok() };
+        if let Some(path) = committed {
+            report.saved.push(path);
             s.write_all(b"OK\n")?; report.succeeded += 1;
         } else {
             s.write_all(b"ERR Cannot-save-file\n")?; report.failed += 1;
@@ -152,7 +156,7 @@ pub fn start(ticket: String, secret: String, token: String, events: std::sync::m
     static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if BUSY.swap(true, Ordering::SeqCst) { return; }
     std::thread::spawn(move || {
-        let result = (|| -> anyhow::Result<String> {
+        let result = (|| -> anyhow::Result<Report> {
             let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
             let mut tunnel = crate::tunnel::Tunnel::start_at(&ticket, port)?;
             let started = std::time::Instant::now();
@@ -165,8 +169,7 @@ pub fn start(ticket: String, secret: String, token: String, events: std::sync::m
                 }
             };
             stream.write_all(format!("SHAR {token}\n").as_bytes())?;
-            let report = receive(&mut stream, &crate::files::downloads_dir())?;
-            Ok(format!("Phone share: {} succeeded, {} failed · Downloads", report.succeeded, report.failed))
+            Ok(receive(&mut stream, &crate::files::downloads_dir())?)
         })().map_err(|e| format!("Phone share interrupted: {e:#}. Check the report on your phone."));
         BUSY.store(false, Ordering::SeqCst);
         let _ = events.send(crate::ble::Event::ShareFinished(result));
@@ -201,6 +204,7 @@ mod tests {
         let mut s = wire(b"OK 3\nFILE 3 612e747874\nnewERR unreadable\nFILE 0 656d707479\nDONE\n");
         let r = receive(&mut s, &d).unwrap();
         assert_eq!((r.succeeded, r.failed), (2, 1));
+        assert_eq!(r.saved, vec![d.join("a (1).txt"), d.join("empty")]);
         assert_eq!(fs::read(d.join("a.txt")).unwrap(), b"old");
         assert_eq!(fs::read(d.join("a (1).txt")).unwrap(), b"new");
         assert_eq!(fs::metadata(d.join("empty")).unwrap().len(), 0);
@@ -217,6 +221,7 @@ mod tests {
         let mut s = wire(b"OK 2\nFILE 3 61\nFILE 0 62\nDONE\n");
         let r = receive(&mut s, &target).unwrap();
         assert_eq!((r.succeeded, r.failed), (0, 2));
+        assert!(r.saved.is_empty());
         assert_eq!(s.output, b"ERR Cannot-create-file\nERR Cannot-create-file\n"); fs::remove_dir_all(d).unwrap();
     }
     #[test] fn rejects_bad_framing() {
