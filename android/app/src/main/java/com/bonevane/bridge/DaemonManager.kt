@@ -6,7 +6,8 @@ import java.net.InetSocketAddress
 import java.net.Socket
 
 /**
- * Starts and stops the shell-uid [Daemon] from inside the app, no computer needed.
+ * Starts and stops [Daemon] via ADB (shell uid), or optionally su (uid 0).
+ * Root mode does not require or change USB/wireless debugging.
  *
  * Precondition: this app holds WRITE_SECURE_SETTINGS (granted once over USB by
  * the Mac, or by an earlier daemon), so it can switch USB debugging on for the
@@ -20,63 +21,116 @@ object DaemonManager {
     const val DAEMON_PORT = 5577
 
     /** Liveness only: a listening port is enough, no secret needed to ask. */
-    fun isDaemonAlive(): Boolean = portOpen(DAEMON_PORT)
+    fun isDaemonAlive(): Boolean = probe(DAEMON_PORT) != null
 
-    private fun portOpen(port: Int): Boolean = runCatching {
-        Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 300) }; true
-    }.getOrDefault(false)
+    /** QUIT ends sessions too: their scrcpy children must not outlive the helper. */
+    private fun quitDaemon(ctx: Context) {
+        Socket("127.0.0.1", DAEMON_PORT).use { s ->
+            s.soTimeout = 3000
+            s.getOutputStream().write((Pairing.authLine(ctx) + "\nQUIT\n").toByteArray())
+            s.getOutputStream().flush()
+            val input = s.getInputStream().bufferedReader()
+            check(input.readLine()?.startsWith("bridge-daemon") == true) { "Helper authentication failed" }
+            check(input.readLine() == "OK bye") { "Helper refused to stop" }
+        }
+        repeat(20) {
+            if (!portOpen(DAEMON_PORT)) return
+            Thread.sleep(100)
+        }
+        error("Helper did not stop")
+    }
+
+    private fun startRoot(ctx: Context) {
+        check(!portOpen(DAEMON_PORT)) { "Another helper holds port $DAEMON_PORT; stop it first" }
+
+        fun quote(value: String) = "'" + value.replace("'", "'\\''") + "'"
+        val cmd =
+            "test \"$(id -u)\" = 0 || exit 1; " +
+                "(BRIDGE_SECRET=${quote(Prefs.pairSecret(ctx))} CLASSPATH=${quote(ctx.applicationInfo.sourceDir)} " +
+                "exec setsid app_process / com.bonevane.bridge.Daemon " +
+                "</dev/null >/data/local/tmp/bridge-daemon-root.out 2>&1) & sleep 1"
+        val process = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
+        try {
+            check(process.waitFor(60, java.util.concurrent.TimeUnit.SECONDS)) { "Root authorization timed out" }
+            check(process.exitValue() == 0) { "Root authorization or helper launch failed" }
+        } finally {
+            process.destroy()
+        }
+        repeat(20) {
+            val hello = probe(DAEMON_PORT)
+            if (hello != null && hello.contains("uid=0 ")) {
+                TunnelState.log("Root helper up: $hello")
+                TunnelService.current?.ble?.sendStatus()
+                return
+            }
+            Thread.sleep(250)
+        }
+        error("Root helper did not answer; see /data/local/tmp/bridge-daemon-root.out")
+    }
+
+    private fun portOpen(port: Int): Boolean =
+        runCatching {
+            Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 300) }
+            true
+        }.getOrDefault(false)
 
     /**
      * Returns the daemon's hello line ("bridge-daemon uid=2000 pid=… up=…s") or
      * null. The hello only comes after the pairing secret, so a stranger who
      * finds the port learns nothing, not even that it's Bridge.
      */
-    fun probe(port: Int, timeoutMs: Int = 500): String? = runCatching {
-        Socket().use { s ->
-            s.connect(InetSocketAddress("127.0.0.1", port), timeoutMs)
-            s.soTimeout = timeoutMs
-            s.getOutputStream().write((Pairing.authLine(AppContext.value) + "\n").toByteArray())
-            s.getOutputStream().flush()
-            s.getInputStream().bufferedReader().readLine()?.takeIf { it.startsWith("bridge-daemon") }
-        }
-    }.getOrNull()
+    fun probe(
+        port: Int,
+        timeoutMs: Int = 500,
+    ): String? =
+        runCatching {
+            Socket().use { s ->
+                s.connect(InetSocketAddress("127.0.0.1", port), timeoutMs)
+                s.soTimeout = timeoutMs
+                s.getOutputStream().write((Pairing.authLine(AppContext.value) + "\n").toByteArray())
+                s.getOutputStream().flush()
+                s
+                    .getInputStream()
+                    .bufferedReader()
+                    .readLine()
+                    ?.takeIf { it.startsWith("bridge-daemon") }
+            }
+        }.getOrNull()
 
     /** The phone's "Stop mirroring": asks the helper to end every screen session. Blocking. */
-    fun endSessions(): String = runCatching {
-        Socket("127.0.0.1", DAEMON_PORT).use { s ->
-            s.soTimeout = 3000
-            s.getOutputStream().write((Pairing.authLine(AppContext.value) + "\nENDSESSIONS\n").toByteArray())
-            s.getOutputStream().flush()
-            val input = s.getInputStream().bufferedReader()
-            input.readLine()            // hello
-            input.readLine() ?: "no reply"
-        }
-    }.getOrElse { "couldn't reach the helper: ${it.message}" }
+    fun endSessions(): String =
+        runCatching {
+            Socket("127.0.0.1", DAEMON_PORT).use { s ->
+                s.soTimeout = 3000
+                s.getOutputStream().write((Pairing.authLine(AppContext.value) + "\nENDSESSIONS\n").toByteArray())
+                s.getOutputStream().flush()
+                val input = s.getInputStream().bufferedReader()
+                input.readLine() // hello
+                input.readLine() ?: "no reply"
+            }
+        }.getOrElse { "couldn't reach the helper: ${it.message}" }
 
     /** Blocking; call from a background thread. Throws with a readable message on failure. */
+    @Synchronized
     fun start(ctx: Context) {
         val squatter = probe(DAEMON_PORT) == null && portOpen(DAEMON_PORT)
         probe(DAEMON_PORT)?.let { hello ->
             // A daemon from before an app update still runs the old code from a
             // directory that no longer exists; replace it.
             val apk = hello.substringAfter("apk=", "")
-            if (apk == ctx.applicationInfo.sourceDir) { TunnelState.log("Daemon already running"); return }
-            TunnelState.log("Daemon is from an older install; restarting it")
-            fun quit(withAuth: Boolean) = runCatching {
-                Socket("127.0.0.1", DAEMON_PORT).use { s ->
-                    s.soTimeout = 2000
-                    val lead = if (withAuth) Pairing.authLine(ctx) + "\n" else ""
-                    s.getOutputStream().write((lead + "QUIT\n").toByteArray()); s.getOutputStream().flush()
-                    s.getInputStream().bufferedReader().readLine()
-                    s.getInputStream().read()
-                }
+            if (apk == ctx.applicationInfo.sourceDir &&
+                (hello.contains("uid=0 ") == Prefs.rootHelper(ctx))
+            ) {
+                TunnelState.log("Daemon already running")
+                return
             }
-            quit(withAuth = true)
-            Thread.sleep(500)
-            // A daemon from before pairing secrets existed treats the AUTH line
-            // as an unknown command and hangs up before reading QUIT; it only
-            // understands a bare QUIT.
-            if (portOpen(DAEMON_PORT)) { quit(withAuth = false); Thread.sleep(500) }
+            quitDaemon(ctx)
+            TunnelState.log("Restarting helper for the current install and privilege mode")
+        }
+
+        if (Prefs.rootHelper(ctx)) {
+            startRoot(ctx)
+            return
         }
 
         if (!AdbToggle.isGranted(ctx)) {
@@ -90,7 +144,10 @@ object DaemonManager {
         if (squatter && AdbToggle.isEnabled(ctx)) {
             TunnelState.log("A helper that doesn't know the pairing secret holds port $DAEMON_PORT; clearing it")
             AdbToggle.set(ctx, false)
-            for (i in 1..20) { if (!portOpen(DAEMON_PORT)) break; Thread.sleep(250) }
+            for (i in 1..20) {
+                if (!portOpen(DAEMON_PORT)) break
+                Thread.sleep(250)
+            }
             Thread.sleep(500)
         }
         if (!AdbToggle.isEnabled(ctx)) {
@@ -116,8 +173,9 @@ object DaemonManager {
             // attached to the PTY (</dev/null), and the shell waits 1 s for that.
             // The secret rides in the environment, which only the daemon's own
             // uid can read; the command line would be visible more widely.
-            val cmd = "(BRIDGE_SECRET=${Prefs.pairSecret(ctx)} CLASSPATH=$apk exec setsid app_process / com.bonevane.bridge.Daemon " +
-                "</dev/null >/data/local/tmp/bridge-daemon.out 2>&1) & sleep 1"
+            val cmd =
+                "(BRIDGE_SECRET=${Prefs.pairSecret(ctx)} CLASSPATH=$apk exec setsid app_process / com.bonevane.bridge.Daemon " +
+                    "</dev/null >/data/local/tmp/bridge-daemon.out 2>&1) & sleep 1"
             it.shell(cmd)
         }
 
@@ -141,19 +199,26 @@ object DaemonManager {
      * locking down there would mean no way back in until the next Wi-Fi.
      * Returns a one-line description of what happened.
      */
-    fun stop(ctx: Context, force: Boolean = false): String {
+    @Synchronized
+    fun stop(
+        ctx: Context,
+        force: Boolean = false,
+    ): String {
         if (!force && Prefs.keepReady(ctx)) {
             TunnelState.log("Disconnect: keeping the daemon (\"keep ready\" is on)")
             return "kept ready (setting)"
         }
-        if (!force && !onWifi(ctx)) {
+        val root = probe(DAEMON_PORT)?.contains("uid=0 ") == true
+        if (!force && !root && !Prefs.rootHelper(ctx) && !onWifi(ctx)) {
             TunnelState.log("Disconnect on cellular: keeping the daemon (no Wi-Fi to restart it)")
             return "kept ready: phone is on cellular"
         }
-        AdbToggle.set(ctx, false)
+        if (isDaemonAlive()) quitDaemon(ctx)
+        // Root mode never changes the user's ADB setting.
+        if (!root && !Prefs.rootHelper(ctx)) AdbToggle.set(ctx, false)
         TunnelState.log("Daemon stopped")
         TunnelService.current?.ble?.sendStatus()
-        return "stopped, USB debugging off"
+        return if (root || Prefs.rootHelper(ctx)) "helper stopped (ADB unchanged)" else "stopped, USB debugging off"
     }
 
     fun onWifi(ctx: Context): Boolean {

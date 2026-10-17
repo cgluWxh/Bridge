@@ -15,7 +15,6 @@ import android.os.Binder
  * Only adb shell (uid 2000) or root may read it; every other app is refused.
  */
 class TicketProvider : ContentProvider() {
-
     override fun onCreate(): Boolean {
         // Providers are created before anything else in the process, so this is
         // the earliest place to keep an application context for the objects
@@ -29,7 +28,7 @@ class TicketProvider : ContentProvider() {
         projection: Array<out String>?,
         selection: String?,
         selectionArgs: Array<out String>?,
-        sortOrder: String?
+        sortOrder: String?,
     ): Cursor {
         val caller = Binder.getCallingUid()
         if (caller != SHELL_UID && caller != ROOT_UID) {
@@ -40,18 +39,41 @@ class TicketProvider : ContentProvider() {
         // The pairing secret travels the same shell-only road as the ticket.
         // daemon=1 only if the helper answers *with this secret*: a leftover
         // helper from an older install holds the port but is useless to us.
-        val daemon = DaemonManager.probe(DaemonManager.DAEMON_PORT) != null
-        return MatrixCursor(arrayOf("ticket", "ready", "status", "secret", "keyOk", "daemon")).apply {
-            addRow(arrayOf<Any>(ticket, if (TunnelState.ready) 1 else 0, TunnelState.status,
-                                Prefs.pairSecret(ctx), if (Prefs.adbKeyAuthorized(ctx)) 1 else 0, if (daemon) 1 else 0))
+        val hello = DaemonManager.probe(DaemonManager.DAEMON_PORT)
+        val daemon = hello != null && (!Prefs.rootHelper(ctx) || hello.contains("uid=0 "))
+        return MatrixCursor(arrayOf("ticket", "ready", "status", "secret", "keyOk", "daemon", "root")).apply {
+            addRow(
+                arrayOf<Any>(
+                    ticket,
+                    if (TunnelState.ready) 1 else 0,
+                    TunnelState.status,
+                    Prefs.pairSecret(ctx),
+                    if (Prefs.adbKeyAuthorized(ctx)) 1 else 0,
+                    if (daemon) 1 else 0,
+                    if (Prefs.rootHelper(ctx)) 1 else 0,
+                ),
+            )
         }
     }
 
     override fun getType(uri: Uri): String? = null
-    override fun insert(uri: Uri, values: ContentValues?): Uri? = null
-    override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int = 0
+
+    override fun insert(
+        uri: Uri,
+        values: ContentValues?,
+    ): Uri? = null
+
+    override fun delete(
+        uri: Uri,
+        selection: String?,
+        selectionArgs: Array<out String>?,
+    ): Int = 0
+
     override fun update(
-        uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?
+        uri: Uri,
+        values: ContentValues?,
+        selection: String?,
+        selectionArgs: Array<out String>?,
     ): Int = 0
 
     private companion object {

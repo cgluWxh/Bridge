@@ -66,6 +66,10 @@ object Prefs {
     // that case too.
     fun keepReady(ctx: Context): Boolean = prefs(ctx).getBoolean("keepReady", true)
 
+    /** Experimental: launch the helper as uid 0 using the user's su manager. */
+    fun rootHelper(ctx: Context): Boolean = prefs(ctx).getBoolean("rootHelper", false)
+    fun setRootHelper(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("rootHelper", on).apply()
+
     /** When this was last changed, so the two devices can tell whose copy is newer. */
     fun keepReadyAt(ctx: Context): Long = prefs(ctx).getLong("keepReadyAt", 0)
 
@@ -96,7 +100,7 @@ object Prefs {
     fun setQuietStatus(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("quietStatus", on).apply()
 
     /** Whether the user has ever gone through setup (a ticket exists and the Mac granted the permission). */
-    fun setupDone(ctx: Context): Boolean = ticket(ctx) != null && AdbToggle.isGranted(ctx)
+    fun setupDone(ctx: Context): Boolean = ticket(ctx) != null && (rootHelper(ctx) || AdbToggle.isGranted(ctx))
 
     // MARK: notification filters
 

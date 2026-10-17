@@ -26,14 +26,13 @@ import com.bonevane.bridge.ui.Mode
  * clipboard, permissions and the service.
  */
 class MainActivity : ComponentActivity() {
-
     companion object {
         const val ACTION_AUTHORIZE = "com.bonevane.bridge.AUTHORIZE"
         const val ACTION_NEARBY = "com.bonevane.bridge.NEARBY"
     }
 
-    /// Permission state is read once per screen; granting happens in a system
-    /// screen, so it has to be re-read when we come back or the list lies.
+    // / Permission state is read once per screen; granting happens in a system
+    // / screen, so it has to be re-read when we come back or the list lies.
     private var accessState by mutableStateOf<List<Access>>(emptyList())
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -44,11 +43,12 @@ class MainActivity : ComponentActivity() {
 
         // Notifications for the foreground service, Bluetooth for the short-range
         // link to the Mac. Asked for together so there's one round of prompts.
-        val wanted = listOf(
-            Manifest.permission.POST_NOTIFICATIONS,
-            "android.permission.BLUETOOTH_ADVERTISE",
-            "android.permission.BLUETOOTH_CONNECT",
-        ).filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        val wanted =
+            listOf(
+                Manifest.permission.POST_NOTIFICATIONS,
+                "android.permission.BLUETOOTH_ADVERTISE",
+                "android.permission.BLUETOOTH_CONNECT",
+            ).filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         if (wanted.isNotEmpty()) requestPermissions(wanted.toTypedArray(), 1)
 
         setContent {
@@ -65,8 +65,11 @@ class MainActivity : ComponentActivity() {
                     onPause = {
                         val policy = TunnelService.current?.policy
                         Thread {
-                            if (policy != null) policy.pause(15)
-                            else DaemonManager.stop(this, force = true)
+                            if (policy != null) {
+                                policy.pause(15)
+                            } else {
+                                DaemonManager.stop(this, force = true)
+                            }
                         }.start()
                     },
                     onLockDown = {
@@ -82,7 +85,7 @@ class MainActivity : ComponentActivity() {
                             startActivity(
                                 Intent(android.provider.Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
                                     .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
-                                    .putExtra(android.provider.Settings.EXTRA_CHANNEL_ID, "tunnel")
+                                    .putExtra(android.provider.Settings.EXTRA_CHANNEL_ID, "tunnel"),
                             )
                         }
                     },
@@ -94,10 +97,11 @@ class MainActivity : ComponentActivity() {
                     onShareLog = {
                         // Straight into WhatsApp, email, notes…: the log is what
                         // gets sent when something goes wrong.
-                        val send = Intent(Intent.ACTION_SEND)
-                            .setType("text/plain")
-                            .putExtra(Intent.EXTRA_SUBJECT, "Bridge log")
-                            .putExtra(Intent.EXTRA_TEXT, TunnelState.logText())
+                        val send =
+                            Intent(Intent.ACTION_SEND)
+                                .setType("text/plain")
+                                .putExtra(Intent.EXTRA_SUBJECT, "Bridge log")
+                                .putExtra(Intent.EXTRA_TEXT, TunnelState.logText())
                         runCatching { startActivity(Intent.createChooser(send, "Share the log")) }
                     },
                     onNewIdentity = ::newIdentity,
@@ -117,15 +121,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        accessState = Access.all(this)      // a permission may have just been granted
+        accessState = Access.all(this) // a permission may have just been granted
         // Bluetooth permission may have just been granted, here or in system
         // settings. Starting again is harmless if the link is already up.
         TunnelService.current?.ble?.let { runCatching { it.start() } }
         // Back from Xiaomi's Autostart screen, say: MIUI refused the listener
         // while Autostart was off and won't try again by itself.
-        if (NotificationRelay.hasAccess(this)) runCatching {
-            android.service.notification.NotificationListenerService.requestRebind(
-                android.content.ComponentName(this, NotificationService::class.java))
+        if (NotificationRelay.hasAccess(this)) {
+            runCatching {
+                android.service.notification.NotificationListenerService.requestRebind(
+                    android.content.ComponentName(this, NotificationService::class.java),
+                )
+            }
         }
     }
 
@@ -142,9 +149,19 @@ class MainActivity : ComponentActivity() {
      */
     private fun setMode(mode: Mode) {
         when (mode) {
-            Mode.OFF -> TunnelService.stop(this)
-            Mode.NEARBY -> { Prefs.setTunnelEnabled(this, false); TunnelService.setTunnel(this, false) }
-            Mode.ANYWHERE -> { Prefs.setTunnelEnabled(this, true); TunnelService.setTunnel(this, true) }
+            Mode.OFF -> {
+                TunnelService.stop(this)
+            }
+
+            Mode.NEARBY -> {
+                Prefs.setTunnelEnabled(this, false)
+                TunnelService.setTunnel(this, false)
+            }
+
+            Mode.ANYWHERE -> {
+                Prefs.setTunnelEnabled(this, true)
+                TunnelService.setTunnel(this, true)
+            }
         }
     }
 
@@ -158,7 +175,13 @@ class MainActivity : ComponentActivity() {
         // it's done (ACTION_NEARBY). The mode the user picked is untouched.
         if (intent?.action == TunnelService.ACTION_START) TunnelService.setTunnel(this, true, remember = false)
         if (intent?.action == ACTION_NEARBY && !Prefs.tunnelEnabled(this)) TunnelService.setTunnel(this, false, remember = false)
-        if (intent?.action == ACTION_AUTHORIZE) authorizeKey()
+        if (intent?.action == ACTION_AUTHORIZE && !Prefs.rootHelper(this)) authorizeKey()
+        if (intent?.action == "com.bonevane.bridge.START_HELPER" && Prefs.rootHelper(this)) {
+            Thread {
+                runCatching { DaemonManager.start(this) }
+                    .onFailure { TunnelState.log("Couldn't start root helper: ${it.message}") }
+            }.start()
+        }
     }
 
     /**
@@ -181,12 +204,13 @@ class MainActivity : ComponentActivity() {
         }.start()
     }
 
-    /// Asks for one permission: a runtime prompt where that applies, otherwise
-    /// the settings screen that grants it.
+    // / Asks for one permission: a runtime prompt where that applies, otherwise
+    // / the settings screen that grants it.
     private fun grantAccess(item: Access) {
-        val missing = item.runtimePermissions.filter {
-            checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
-        }
+        val missing =
+            item.runtimePermissions.filter {
+                checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+            }
         if (missing.isNotEmpty()) {
             requestPermissions(missing.toTypedArray(), 2)
             return
@@ -198,9 +222,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun versionName(): String = runCatching {
-        packageManager.getPackageInfo(packageName, 0).versionName ?: ""
-    }.getOrDefault("")
+    private fun versionName(): String =
+        runCatching {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+        }.getOrDefault("")
 
     private fun currentTicket(): String? = TunnelState.ticket ?: Prefs.ticket(this)
 
@@ -215,7 +240,7 @@ class MainActivity : ComponentActivity() {
 
     private fun askBatteryExemption() {
         startActivity(
-            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")),
         )
     }
 

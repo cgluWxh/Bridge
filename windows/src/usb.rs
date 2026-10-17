@@ -140,6 +140,24 @@ fn flow(events: &Sender<Event>) -> Result<Credentials> {
     let creds = creds.ok_or_else(|| anyhow!("The phone didn't report a ticket. Open Bridge on the phone and check its log."))?;
     crate::log!("usb", "got the ticket and pairing secret from the phone");
 
+    let root = run(&adb, &["-s", serial, "shell", "content", "query", "--uri", TICKET_URI]).contains("root=1");
+    if root {
+        progress(events, "Starting the root helper; allow Bridge in the phone's root manager…");
+        run(&adb, &["-s", serial, "shell", "am", "start", "-n", ACTIVITY, "-a", "com.bonevane.bridge.START_HELPER"]);
+        let mut up = false;
+        for _ in 0..70 {
+            let q = run(&adb, &["-s", serial, "shell", "content", "query", "--uri", TICKET_URI]);
+            if q.contains("daemon=1") { up = true; break; }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        if !up {
+            bail!("The root helper didn't start. Open Bridge on the phone, allow root access and check its log. No ADB key authorization is needed.");
+        }
+        run(&adb, &["-s", serial, "shell", "am", "start", "-n", ACTIVITY, "-a", "com.bonevane.bridge.NEARBY"]);
+        progress(events, "Root helper ready. You can unplug and turn USB debugging off.");
+        return Ok(creds);
+    }
+
     // Lets the phone app switch USB debugging on and off by itself (AdbToggle.kt).
     let grant = run(&adb, &["-s", serial, "shell", "pm", "grant", PACKAGE, "android.permission.WRITE_SECURE_SETTINGS"]);
     if !grant.trim().is_empty() {

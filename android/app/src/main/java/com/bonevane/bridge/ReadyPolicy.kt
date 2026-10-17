@@ -24,14 +24,19 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Lives inside the tunnel service, so it runs as long as the tunnel does.
  */
-class ReadyPolicy(private val ctx: Context) {
+class ReadyPolicy(
+    private val ctx: Context,
+) {
     private val cm = ctx.getSystemService(ConnectivityManager::class.java)
     private val main = Handler(Looper.getMainLooper())
     private val starting = AtomicBoolean(false)
 
-    private val callback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) { maybeStart("Wi-Fi available") }
-    }
+    private val callback =
+        object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                maybeStart("Wi-Fi available")
+            }
+        }
 
     companion object {
         /** Lock down this long after the Mac goes quiet (it may have crashed). */
@@ -40,10 +45,12 @@ class ReadyPolicy(private val ctx: Context) {
 
     fun start() {
         scheduleWatchdog()
-        val request = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-            .build()
+        val request =
+            NetworkRequest
+                .Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                .build()
         cm.registerNetworkCallback(request, callback)
         scheduleResumeCheck()
     }
@@ -59,9 +66,9 @@ class ReadyPolicy(private val ctx: Context) {
         Prefs.setPausedUntil(ctx, System.currentTimeMillis() + minutes * 60_000L)
         DaemonManager.stop(ctx, force = true)
         val resume = if (Prefs.keepReady(ctx)) "back in $minutes min" else "stays off"
-        TunnelState.log("Paused for $minutes min (USB debugging off, $resume)")
+        TunnelState.log("Paused for $minutes min (helper stopped, $resume)")
         scheduleResumeCheck()
-        return "paused $minutes min, USB debugging off ($resume)"
+        return "paused $minutes min, helper stopped ($resume)"
     }
 
     fun resume() {
@@ -73,7 +80,7 @@ class ReadyPolicy(private val ctx: Context) {
 
     /** Starts the daemon in the background if the setting says so and it's possible. */
     fun maybeStart(reason: String) {
-        if (!Prefs.keepReady(ctx) || isPaused || !AdbToggle.isGranted(ctx)) return
+        if (!Prefs.keepReady(ctx) || isPaused || (!Prefs.rootHelper(ctx) && !AdbToggle.isGranted(ctx))) return
         if (DaemonManager.isDaemonAlive()) return
         if (!starting.compareAndSet(false, true)) return
         Thread {
@@ -95,22 +102,26 @@ class ReadyPolicy(private val ctx: Context) {
      * to keep the phone ready.
      */
     private fun scheduleWatchdog() {
-        main.postDelayed(object : Runnable {
-            override fun run() {
-                // Revive anything that has quietly died. The helper is a plain
-                // shell process: Android can reap it at any time, and nothing
-                // else would ever bring it back while "keep ready" is on.
-                TunnelService.current?.clipboard?.start()
-                maybeStart("watchdog")
-                val macNearby = TunnelService.current?.ble?.connected == true
-                if (!Prefs.keepReady(ctx) && !isPaused && AdbToggle.isEnabled(ctx) && !macNearby &&
-                    !TunnelState.macActive(IDLE_LOCKDOWN_MS) && DaemonManager.isDaemonAlive()) {
-                    TunnelState.log("No Mac for 10 minutes: turning USB debugging off")
-                    DaemonManager.stop(ctx, force = true)
+        main.postDelayed(
+            object : Runnable {
+                override fun run() {
+                    // Revive anything that has quietly died. The helper is a plain
+                    // shell process: Android can reap it at any time, and nothing
+                    // else would ever bring it back while "keep ready" is on.
+                    TunnelService.current?.clipboard?.start()
+                    maybeStart("watchdog")
+                    val macNearby = TunnelService.current?.ble?.connected == true
+                    if (!Prefs.keepReady(ctx) && !isPaused && !macNearby &&
+                        !TunnelState.macActive(IDLE_LOCKDOWN_MS) && DaemonManager.isDaemonAlive()
+                    ) {
+                        TunnelState.log("No Mac for 10 minutes: stopping helper")
+                        DaemonManager.stop(ctx, force = true)
+                    }
+                    main.postDelayed(this, 60_000)
                 }
-                main.postDelayed(this, 60_000)
-            }
-        }, 60_000)
+            },
+            60_000,
+        )
     }
 
     private fun scheduleResumeCheck() {

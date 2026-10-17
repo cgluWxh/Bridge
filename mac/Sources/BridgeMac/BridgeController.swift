@@ -370,6 +370,27 @@ final class BridgeController: ObservableObject {
             appendLog(pairSecret.isEmpty ? "Got ticket from phone (no pairing secret: old phone app?)."
                                          : "Got ticket and pairing secret from phone.")
 
+            let rootHelper = await background {
+                Shell.run(adb, ["-s", usbSerial, "shell", "content", "query", "--uri", ticketURI], timeout: 10).output.contains("root=1")
+            }
+            if rootHelper {
+                phase = .working("Starting root helper; allow Bridge in the phone's root manager…")
+                _ = await background {
+                    Shell.run(adb, ["-s", usbSerial, "shell", "am", "start", "-n", activity, "-a", "com.bonevane.bridge.START_HELPER"], timeout: 10)
+                }
+                var rootUp = false
+                for _ in 0..<70 {
+                    let q = await background {
+                        Shell.run(adb, ["-s", usbSerial, "shell", "content", "query", "--uri", ticketURI], timeout: 10).output
+                    }
+                    if q.contains("daemon=1") { rootUp = true; break }
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+                guard rootUp else {
+                    fail("The root helper didn't start. Open Bridge on the phone, allow root access and check its log. No ADB key authorization is needed.")
+                    return
+                }
+            } else {
             // Lets the phone app switch USB debugging on/off by itself (see AdbToggle.kt).
             let package = BridgeController.phonePackage
             let grant = await background {
@@ -454,13 +475,14 @@ final class BridgeController: ObservableObject {
                 }
                 appendLog("The helper didn't come up; its log ends with: \(tail.trimmingCharacters(in: .whitespacesAndNewlines))", source: "adb")
             }
+            } // ADB-only initialization; root mode never authorizes the app's ADB key.
             // Setup switched the phone's tunnel on to mint the ticket; hand it
             // back to whatever mode the user chose (Nearby by default).
             _ = await background {
                 Shell.run(adb, ["-s", usbSerial, "shell", "am", "start", "-n", activity, "-a", "com.bonevane.bridge.NEARBY"], timeout: 10)
             }
             phase = .idle
-            notice = (keepReady
+            notice = rootHelper ? "Root helper ready. Unplug, turn USB debugging off if desired, and click Mirror Phone." : (keepReady
                 ? "Set up, and the helper is running. Unplug and click Mirror Phone."
                 : "Set up. Unplug and click Mirror Phone. After each session the phone locks down again; turn on \"Keep ready\" to skip that.")
                 + " The phone will now ask to pair over Bluetooth: accept it, that's the link for notifications and clipboard."
