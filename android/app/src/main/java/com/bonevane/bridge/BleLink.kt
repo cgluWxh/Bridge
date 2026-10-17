@@ -90,6 +90,8 @@ class BleLink(private val context: Context) {
         const val TYPE_ART: Byte = 10
         /** Directed hotspot reply; never broadcast or log its payload. */
         const val TYPE_HOTSPOT: Byte = 11
+        /** Directed share offer: a short-lived, single-use task capability. */
+        const val TYPE_SHARE: Byte = 12
 
         /** Conservative: the default ATT MTU is 23, of which 3 bytes are overhead. */
         private const val MIN_PAYLOAD = 20
@@ -136,6 +138,21 @@ class BleLink(private val context: Context) {
     private val peers = java.util.concurrent.ConcurrentHashMap<BluetoothDevice, Peer>()
     /** MTU per link; negotiated before the subscription that creates the Peer. */
     private val mtus = java.util.concurrent.ConcurrentHashMap<BluetoothDevice, Int>()
+
+    data class SharePeer(val id: String, val name: String, val supported: Boolean)
+
+    @SuppressLint("MissingPermission")
+    fun sharePeers(): List<SharePeer> = peers.values.filter { it.verified }.map {
+        SharePeer(it.device.address, it.name ?: it.label, it.platform == "windows" && it.crypto != null)
+    }.sortedBy { it.name }
+
+    fun offerShare(id: String, token: String): Boolean {
+        val peer = peers.values.firstOrNull {
+            it.device.address == id && it.verified && it.platform == "windows" && it.crypto != null
+        } ?: return false
+        sendTo(peer, TYPE_SHARE, token)
+        return true
+    }
 
     @Volatile var connected = false
         private set(value) { field = value; TunnelState.macLinked = value }

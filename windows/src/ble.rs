@@ -75,6 +75,8 @@ pub enum Event {
     /// Transfer progress: what's moving, and how far (0.0 to 1.0).
     FileProgress(String, f32),
     FileDone(Result<String, String>),
+    ShareOffer(String),
+    ShareFinished(Result<String, String>),
     /// The phone is paired (bonded) in Windows' Bluetooth settings, which
     /// breaks the link: Bridge connects unpaired, and encrypts by itself.
     PairedInWindows { name: String, address: u64 },
@@ -738,6 +740,11 @@ fn receive(bytes: &[u8], link: &Arc<Mutex<Link>>, events: &Sender<Event>, secret
         }
         Kind::Status => {
             let _ = events.send(Event::Status(protocol::parse_status(&text)));
+        }
+        Kind::Share => {
+            if text.len() == 32 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
+                let _ = events.send(Event::ShareOffer(text));
+            }
         }
         Kind::Hotspot => {
             if let Some(reply) = parse_hotspot_reply(&text) { let _ = events.send(reply); }

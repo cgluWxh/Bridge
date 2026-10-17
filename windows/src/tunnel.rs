@@ -31,9 +31,14 @@ impl Tunnel {
     }
 
     pub fn start(ticket: &str) -> Result<Tunnel> {
+        Self::start_at(ticket, LOCAL_PORT)
+    }
+
+    /// Separate listeners let incoming shares outlive a mirroring session.
+    pub fn start_at(ticket: &str, port: u16) -> Result<Tunnel> {
         let exe = Self::dumbpipe()?;
         let mut child = Command::new(&exe)
-            .args(["connect-tcp", "--addr", &format!("127.0.0.1:{LOCAL_PORT}"), ticket])
+            .args(["connect-tcp", "--addr", &format!("127.0.0.1:{port}"), ticket])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -127,9 +132,14 @@ pub struct Stream {
 
 impl Stream {
     pub fn open(secret: &str, timeout: Duration) -> Result<Stream> {
-        let addr = format!("127.0.0.1:{LOCAL_PORT}").parse().unwrap();
+        Self::open_at(secret, timeout, LOCAL_PORT)
+    }
+
+    pub fn open_at(secret: &str, timeout: Duration, port: u16) -> Result<Stream> {
+        let addr = format!("127.0.0.1:{port}").parse().unwrap();
         let mut inner = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).context("tunnel not listening")?;
         inner.set_read_timeout(Some(timeout))?;
+        inner.set_write_timeout(Some(timeout))?;
         inner.set_nodelay(true)?;
         inner.write_all(format!("AUTH {secret}\n").as_bytes())?;
         Ok(Stream { inner })
@@ -182,6 +192,14 @@ impl Stream {
         inner.set_read_timeout(None)?;
         Ok(Stream { inner })
     }
+}
+
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> { self.inner.read(buf) }
+}
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> { self.inner.write(buf) }
+    fn flush(&mut self) -> std::io::Result<()> { self.inner.flush() }
 }
 
 /// One-line command → one-line reply ("OK …" / "ERR …").

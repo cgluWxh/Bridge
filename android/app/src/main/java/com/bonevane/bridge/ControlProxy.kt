@@ -25,7 +25,9 @@ import java.net.Socket
  * enable everything remotely and Disconnect can put the phone back into the
  * "no USB debugging" state that banking apps insist on.
  */
-class ControlProxy(private val ctx: Context) {
+class ControlProxy(
+    private val ctx: Context,
+) {
     companion object {
         const val PORT = 5580
     }
@@ -43,7 +45,10 @@ class ControlProxy(private val ctx: Context) {
         }, "proxy-accept").start()
     }
 
-    fun stop() { runCatching { server?.close() }; server = null }
+    fun stop() {
+        runCatching { server?.close() }
+        server = null
+    }
 
     private fun handle(client: Socket) {
         client.use {
@@ -66,15 +71,33 @@ class ControlProxy(private val ctx: Context) {
                 n += r
             }
             when (String(head)) {
-                "VIDE", "AUDI", "CTRL", "CLIP", "INST", "PUSH", "LIST", "PULL" -> pipeToDaemon(it, head)   // daemon streams
-                "NOTI" -> notifications(it)
-                else -> control(it, head)
+                "VIDE", "AUDI", "CTRL", "CLIP", "INST", "PUSH", "LIST", "PULL" -> {
+                    pipeToDaemon(it, head)
+                }
+
+                // daemon streams
+                "NOTI" -> {
+                    notifications(it)
+                }
+
+                "SHAR" -> {
+                    // App-owned URI shares: never forward these to the shell daemon.
+                    val token = readLine(input, 100)?.trim().orEmpty()
+                    ShareTransfer.serve(it, token)
+                }
+
+                else -> {
+                    control(it, head)
+                }
             }
         }
     }
 
     /** Session streams go to the shell-uid daemon, which relays scrcpy-server's sockets. */
-    private fun pipeToDaemon(client: Socket, head: ByteArray) {
+    private fun pipeToDaemon(
+        client: Socket,
+        head: ByteArray,
+    ) {
         // A session's worth of traffic is starting: keep the radio responsive
         // while it lasts, and let it idle again afterwards.
         if (TunnelState.openStreams.incrementAndGet() == 1) {
@@ -83,7 +106,9 @@ class ControlProxy(private val ctx: Context) {
         // The video stream is what "mirroring" means on the phone's screen.
         val video = String(head) == "VIDE"
         if (video && TunnelState.videoStreams.incrementAndGet() == 1) TunnelState.notifyListeners()
-        try { pipeToDaemonInner(client, head) } finally {
+        try {
+            pipeToDaemonInner(client, head)
+        } finally {
             if (TunnelState.openStreams.decrementAndGet() == 0) {
                 TunnelService.current?.holdWifiAwake(false)
             }
@@ -92,17 +117,29 @@ class ControlProxy(private val ctx: Context) {
         }
     }
 
-    private fun pipeToDaemonInner(client: Socket, head: ByteArray) {
-        val daemon = runCatching { Socket("127.0.0.1", DaemonManager.DAEMON_PORT) }
-            .getOrElse { TunnelState.log("session stream refused: daemon not running"); return }
+    private fun pipeToDaemonInner(
+        client: Socket,
+        head: ByteArray,
+    ) {
+        val daemon =
+            runCatching { Socket("127.0.0.1", DaemonManager.DAEMON_PORT) }
+                .getOrElse {
+                    TunnelState.log("session stream refused: daemon not running")
+                    return
+                }
         daemon.use {
             it.getOutputStream().write((Pairing.authLine(ctx) + "\n").toByteArray())
             it.getOutputStream().flush()
             if (readLine(it.getInputStream(), 200)?.startsWith("bridge-daemon") != true) {
-                TunnelState.log("session stream refused: the helper rejected the pairing secret"); return
+                TunnelState.log("session stream refused: the helper rejected the pairing secret")
+                return
             }
             it.getOutputStream().write(head)
-            val t = Thread { pump(it.getInputStream(), client.getOutputStream()); runCatching { client.shutdownOutput() } }
+            val t =
+                Thread {
+                    pump(it.getInputStream(), client.getOutputStream())
+                    runCatching { client.shutdownOutput() }
+                }
             t.start()
             pump(client.getInputStream(), it.getOutputStream())
             runCatching { it.shutdownOutput() }
@@ -111,7 +148,10 @@ class ControlProxy(private val ctx: Context) {
     }
 
     /** One line, without pulling a byte past the newline (the rest is binary). */
-    private fun readLine(input: InputStream, max: Int): String? {
+    private fun readLine(
+        input: InputStream,
+        max: Int,
+    ): String? {
         val sb = StringBuilder()
         while (sb.length < max) {
             val c = input.read()
@@ -122,13 +162,17 @@ class ControlProxy(private val ctx: Context) {
         return null
     }
 
-    private fun pump(from: InputStream, to: OutputStream) {
+    private fun pump(
+        from: InputStream,
+        to: OutputStream,
+    ) {
         val buf = ByteArray(64 * 1024)
         runCatching {
             while (true) {
                 val r = from.read(buf)
                 if (r < 0) break
-                to.write(buf, 0, r); to.flush()
+                to.write(buf, 0, r)
+                to.flush()
             }
         }
     }
@@ -141,9 +185,12 @@ class ControlProxy(private val ctx: Context) {
     private fun notifications(client: Socket) {
         val out = client.getOutputStream()
         if (!NotificationRelay.hasAccess(ctx)) {
-            out.write("ERR notification access not granted on the phone\n".toByteArray()); out.flush(); return
+            out.write("ERR notification access not granted on the phone\n".toByteArray())
+            out.flush()
+            return
         }
-        out.write("OK\n".toByteArray()); out.flush()
+        out.write("OK\n".toByteArray())
+        out.flush()
 
         // onNotificationPosted runs on the main thread, where Android forbids
         // socket writes, so the callback only queues and this thread does the
@@ -165,63 +212,101 @@ class ControlProxy(private val ctx: Context) {
         }
     }
 
-    private fun control(client: Socket, head: ByteArray) {
+    private fun control(
+        client: Socket,
+        head: ByteArray,
+    ) {
         val rest = client.getInputStream().bufferedReader().readLine() ?: ""
         val line = (String(head) + rest).trim()
         val out = client.getOutputStream()
-        fun reply(s: String) { out.write("$s\n".toByteArray()); out.flush() }
+
+        fun reply(s: String) {
+            out.write("$s\n".toByteArray())
+            out.flush()
+        }
         TunnelState.log("Mac: $line")
         when (line.substringBefore(' ')) {
             // "START by=<computer name>": the name is for "Mirroring to …".
-            "START" -> runCatching {
-                line.substringAfter("by=", "").trim().takeIf { it.isNotEmpty() }?.let { TunnelState.sessionBy = it.take(60) }
-                DaemonManager.start(ctx)
+            "START" -> {
+                runCatching {
+                    line
+                        .substringAfter("by=", "")
+                        .trim()
+                        .takeIf { it.isNotEmpty() }
+                        ?.let { TunnelState.sessionBy = it.take(60) }
+                    DaemonManager.start(ctx)
+                }.onSuccess { reply("OK daemon running") }
+                    .onFailure { reply("ERR ${it.message}") }
             }
-                .onSuccess { reply("OK daemon running") }
-                .onFailure { reply("ERR ${it.message}") }
+
             "STOP" -> {
                 // Reply first: the reply goes over the tunnel, which may be
                 // about to be switched off. endSession waits for the streams.
                 reply("OK session over")
                 TunnelService.endSession(ctx, "A computer (over the tunnel)")
             }
-            "LOCKDOWN" -> reply("OK " + DaemonManager.stop(ctx, force = true))
+
+            "LOCKDOWN" -> {
+                reply("OK " + DaemonManager.stop(ctx, force = true))
+            }
+
             "PAUSE" -> {
                 val minutes = line.substringAfter(' ', "15").trim().toIntOrNull() ?: 15
                 val policy = TunnelService.current?.policy
                 reply("OK " + (policy?.pause(minutes) ?: DaemonManager.stop(ctx, force = true)))
             }
-            "RESUME" -> { TunnelService.current?.policy?.resume(); reply("OK resuming") }
-            "MODE" -> {   // MODE keep | MODE lock: the Mac mirrors the user's setting
+
+            "RESUME" -> {
+                TunnelService.current?.policy?.resume()
+                reply("OK resuming")
+            }
+
+            "MODE" -> { // MODE keep | MODE lock: the Mac mirrors the user's setting
                 val keep = line.substringAfter(' ', "").trim() == "keep"
                 Prefs.setKeepReady(ctx, keep)
                 reply("OK mode=${if (keep) "keep" else "lock"}")
             }
+
             // Experiment: can the *app* (normal uid) touch the clipboard in the
             // background? Android 10+ normally refuses. Names avoid the stream
             // prefixes CLIP/PUSH/NOTI.
             "CBGET" -> {
                 val cm = ctx.getSystemService(android.content.ClipboardManager::class.java)
-                val text = runCatching { cm.primaryClip?.getItemAt(0)?.coerceToText(ctx)?.toString() }
-                    .getOrElse { "EXCEPTION ${it.javaClass.simpleName}" }
+                val text =
+                    runCatching {
+                        cm.primaryClip
+                            ?.getItemAt(0)
+                            ?.coerceToText(ctx)
+                            ?.toString()
+                    }.getOrElse { "EXCEPTION ${it.javaClass.simpleName}" }
                 reply("OK read=${text ?: "<null>"}")
             }
+
             "CBSET" -> {
                 val value = line.substringAfter(' ', "")
-                val ok = runCatching {
-                    ctx.getSystemService(android.content.ClipboardManager::class.java)
-                        .setPrimaryClip(android.content.ClipData.newPlainText("Bridge", value)); true
-                }.getOrElse { false }
+                val ok =
+                    runCatching {
+                        ctx
+                            .getSystemService(android.content.ClipboardManager::class.java)
+                            .setPrimaryClip(android.content.ClipData.newPlainText("Bridge", value))
+                        true
+                    }.getOrElse { false }
                 reply("OK wrote=$ok")
             }
+
             "STATUS" -> {
                 val adb = AdbToggle.isEnabled(ctx)
                 val paused = TunnelService.current?.policy?.isPaused ?: false
-                reply("OK adb=$adb daemon=${DaemonManager.isDaemonAlive()} keep=${Prefs.keepReady(ctx)}" +
-                    " keepAt=${Prefs.keepReadyAt(ctx)}" +
-                    " paused=$paused notif=${NotificationRelay.hasAccess(ctx)}")
+                reply(
+                    "OK adb=$adb daemon=${DaemonManager.isDaemonAlive()} keep=${Prefs.keepReady(ctx)}" +
+                        " keepAt=${Prefs.keepReadyAt(ctx)}" +
+                        " paused=$paused notif=${NotificationRelay.hasAccess(ctx)}",
+                )
             }
-            else -> reply("ERR unknown command")
+
+            else -> {
+                reply("ERR unknown command")
+            }
         }
     }
 }

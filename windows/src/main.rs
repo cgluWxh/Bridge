@@ -19,6 +19,7 @@ mod ble;
 mod clipboard;
 mod files;
 mod hotspot;
+mod incoming;
 mod log;
 mod notify;
 mod protocol;
@@ -1198,6 +1199,19 @@ impl App {
 
     fn handle(&mut self, event: Event) {
         match event {
+            Event::ShareOffer(token) => {
+                if self.creds.is_paired() {
+                    incoming::start(self.creds.ticket.clone(), self.creds.secret.clone(), token, self.events_tx.clone());
+                    self.log("files", "Receiving a phone share in the background");
+                }
+            }
+            Event::ShareFinished(result) => {
+                match result {
+                    Ok(text) => self.log("files", &text),
+                    Err(text) => { self.log("files", &text); self.error = Some(text); }
+                }
+                self.refresh();
+            }
             Event::HotspotReply { id, credentials } => {
                 if self.hotspot_pending.as_deref() != Some(id.as_str()) || self.hotspot_joining { return; }
                 match credentials {
@@ -1659,12 +1673,21 @@ fn main() {
     let files_window = FilesWindow::new().expect("files window");
     let app = Rc::new(RefCell::new(App::new(window.clone_strong(), settings_window.clone_strong(), files_window.clone_strong())));
 
-    // Tray: left-click shows the window; the menu has Open, Settings and Quit.
+    // Tray: left-click shows the window; quick actions reuse the main UI callbacks.
     let menu = tray_icon::menu::Menu::new();
     let show = tray_icon::menu::MenuItem::new("Open Bridge", true, None);
+    let mirror_item = tray_icon::menu::MenuItem::new("Mirror phone", false, None);
+    let hotspot_item = tray_icon::menu::MenuItem::new("Connect hotspot", false, None);
+    let files_item = tray_icon::menu::MenuItem::new("Manage phone files", false, None);
+    let focus_item = tray_icon::menu::CheckMenuItem::new("Focus mode", true, false, None);
     let settings_item = tray_icon::menu::MenuItem::new("Settings…", true, None);
     let quit = tray_icon::menu::MenuItem::new("Quit Bridge", true, None);
-    let _ = menu.append_items(&[&show, &settings_item, &tray_icon::menu::PredefinedMenuItem::separator(), &quit]);
+    let _ = menu.append_items(&[
+        &show, &tray_icon::menu::PredefinedMenuItem::separator(),
+        &mirror_item, &hotspot_item, &files_item, &focus_item,
+        &tray_icon::menu::PredefinedMenuItem::separator(),
+        &settings_item, &quit,
+    ]);
     let _tray = tray_icon::TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_tooltip("Bridge")
@@ -1956,8 +1979,36 @@ fn main() {
                     let _ = s.hide();
                 }
             }
+            {
+                let app = a.borrow();
+                let busy = app.window.global::<AppState>().get_busy();
+                mirror_item.set_enabled(app.creds.is_paired() && !busy && !app.mirroring);
+                hotspot_item.set_enabled(app.linked && !busy && app.hotspot_pending.is_none()
+                    && app.phone_status.get("root").map(String::as_str) == Some("1"));
+                files_item.set_enabled(app.creds.is_paired());
+                focus_item.set_checked(app.window.global::<AppState>().get_focus_active());
+            }
             while let Ok(e) = tray_events.try_recv() {
-                if e.id == show.id() {
+                if e.id == mirror_item.id() {
+                    let mut app = a.borrow_mut();
+                    if app.creds.is_paired() && !app.mirroring && !app.window.global::<AppState>().get_busy() {
+                        app.connect();
+                    }
+                } else if e.id == hotspot_item.id() {
+                    let mut app = a.borrow_mut();
+                    if !app.window.global::<AppState>().get_busy() {
+                        app.join_phone_hotspot();
+                    }
+                } else if e.id == files_item.id() {
+                    let mut app = a.borrow_mut();
+                    if app.creds.is_paired() {
+                        app.open_files();
+                    }
+                } else if e.id == focus_item.id() {
+                    let mut app = a.borrow_mut();
+                    let active = app.window.global::<AppState>().get_focus_active();
+                    app.set_focus(if active { -1 } else { 0 });
+                } else if e.id == show.id() {
                     if let Some(w) = w.upgrade() {
                         let _ = w.show();
                     }

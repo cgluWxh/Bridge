@@ -28,6 +28,8 @@ pub enum Kind {
     Art = 10,
     /// Directed, credential-bearing hotspot response. Never log its payload.
     Hotspot = 11,
+    /// Single-use file share offer, directed to this computer.
+    Share = 12,
 }
 
 impl Kind {
@@ -44,6 +46,7 @@ impl Kind {
             9 => Kind::Media,
             10 => Kind::Art,
             11 => Kind::Hotspot,
+            12 => Kind::Share,
             _ => return None,
         })
     }

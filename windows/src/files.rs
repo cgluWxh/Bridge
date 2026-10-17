@@ -61,6 +61,13 @@ pub fn list(secret: &str, path: &str) -> Result<(String, Vec<Entry>)> {
 
 /// Where downloads land: the user's Downloads folder.
 pub fn downloads_dir() -> PathBuf {
+    // Respect Downloads moved to another drive / redirected by Windows.
+    use windows::Win32::UI::Shell::{SHGetKnownFolderPath, FOLDERID_Downloads, KF_FLAG_DEFAULT};
+    if let Ok(path) = unsafe { SHGetKnownFolderPath(&FOLDERID_Downloads, KF_FLAG_DEFAULT, None) } {
+        let dir = unsafe { path.to_string() }.ok().map(PathBuf::from);
+        unsafe { windows::Win32::System::Com::CoTaskMemFree(Some(path.0.cast())) };
+        if let Some(dir) = dir { return dir; }
+    }
     std::env::var("USERPROFILE").map(|h| PathBuf::from(h).join("Downloads")).unwrap_or_else(|_| PathBuf::from("."))
 }
 
