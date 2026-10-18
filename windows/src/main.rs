@@ -756,6 +756,16 @@ impl App {
         self.refresh();
     }
 
+    fn expire_focus(&mut self) {
+        if self.focus_active && self.focus_until.map(|t| Instant::now() >= t).unwrap_or(false) {
+            self.set_focus(-1);
+            notify::show("Bridge", "Focus complete", &format!(
+                "Phone notifications resumed. {} collected during focus — review them in Bridge.",
+                self.focus_notifications.len()
+            ));
+        }
+    }
+
     fn join_phone_hotspot(&mut self) {
         if !self.linked || self.hotspot_pending.is_some() { return; }
         if self.phone_status.get("root").map(String::as_str) != Some("1") {
@@ -1408,7 +1418,7 @@ impl App {
             Event::Notification(n) => {
                 if self.settings.mirror_notifications {
                     if self.focus_active && self.focus_until.map(|t| Instant::now() >= t).unwrap_or(false) {
-                        self.set_focus(-1);
+                        self.expire_focus();
                     }
                     if self.focus_active {
                         if n.id != 0 {
@@ -1925,7 +1935,7 @@ fn main() {
                 Timer::single_shot(Duration::from_secs(minutes as u64 * 60), move || {
                     if let Some(app) = weak.upgrade() {
                         let mut app = app.borrow_mut();
-                        if app.focus_generation == generation { app.set_focus(-1); }
+                        if app.focus_generation == generation { app.expire_focus(); }
                     }
                 });
             }
