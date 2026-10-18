@@ -133,6 +133,15 @@ object DaemonManager {
     /** Blocking; call from a background thread. Throws with a readable message on failure. */
     @Synchronized
     fun start(ctx: Context) {
+        // On Android 10 only the computer may start/replace the helper.
+        // Do not stop an existing helper or change ADB settings here.
+        if (LegacyAndroid.manualHelper) {
+            if (isDaemonAlive()) {
+                LegacyAndroid.activated(ctx)
+                return
+            }
+            LegacyAndroid.requireUsb(ctx)
+        }
         val squatter = probe(DAEMON_PORT) == null && portOpen(DAEMON_PORT)
         probe(DAEMON_PORT)?.let { hello ->
             // A daemon from before an app update still runs the old code from a

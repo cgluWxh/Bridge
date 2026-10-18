@@ -31,6 +31,7 @@ mod tunnel;
 mod twins;
 mod usb;
 mod video;
+mod window_bounds;
 
 use ble::Event;
 use protocol::Kind;
@@ -2063,6 +2064,7 @@ fn main() {
         let tray_clicks = tray_icon::TrayIconEvent::receiver();
         timer.start(TimerMode::Repeated, Duration::from_millis(250), move || {
             a.borrow_mut().poll();
+            window_bounds::constrain_windows();
             // Minimise = to the tray, like close. Slint has no minimise
             // callback, so watch the state: un-minimise (so a later show()
             // brings a normal window back) and hide.

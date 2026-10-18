@@ -225,7 +225,8 @@ fun BridgeScreen(
             // USB items count too; after it they're setup history, not to-dos
             // (USB debugging is off whenever "keep ready" is).
             // Recompute when root mode changes; Activity's permission snapshot may still contain ADB rows.
-            val visibleAccess = if (rootHelper) Access.all(context) else accessItems
+            val manualHelper = com.bonevane.bridge.LegacyAndroid.manualHelper
+            val visibleAccess = if (rootHelper && !manualHelper) Access.all(context) else accessItems
             val userGrantable = visibleAccess.filter { it.intent != null || it.runtimePermissions.isNotEmpty() }
             val counted =
                 if (setupDone) {
@@ -250,9 +251,9 @@ fun BridgeScreen(
                         StepRow(
                             number = 2,
                             done = ticket != null,
-                            title = if (rootHelper) "Start the root helper" else "Plug into your computer once",
+                            title = if (rootHelper && !manualHelper) "Start the root helper" else "Plug into your computer once",
                             body =
-                                if (rootHelper) {
+                                if (rootHelper && !manualHelper) {
                                     "Tap Get ready now and allow root access. Turn on Anywhere and copy the ticket to your computer to pair without USB debugging."
                                 } else {
                                     "Open Bridge on your Mac or PC and click Set up over USB. The phone asks to " +
@@ -263,7 +264,7 @@ fun BridgeScreen(
                         )
                     }
                 }
-            } else if (keepReady && helperAlive == false) {
+            } else if ((keepReady || manualHelper) && helperAlive == false) {
                 // Typical after a reboot: the setting says "ready", but the
                 // helper died with the phone and can't come back by itself
                 // without Wi-Fi. Say so, instead of leaving "Ready" on screen.
@@ -271,13 +272,15 @@ fun BridgeScreen(
                     icon = Icons.Rounded.RestartAlt,
                     title = "The helper isn't running",
                     body =
-                        if (rootHelper) {
+                        if (manualHelper) {
+                            com.bonevane.bridge.LegacyAndroid.USB_REQUIRED
+                        } else if (rootHelper) {
                             "Tap Start it now and allow Bridge in your root manager. USB debugging is not required."
                         } else {
                             "Usually because the phone restarted. It comes back on its own on Wi-Fi, " +
                                 "or plug into your computer and use Set up over USB."
                         },
-                    action = "Start it now" to onGetReady,
+                    action = if (manualHelper) null else "Start it now" to onGetReady,
                 )
             }
 
@@ -294,12 +297,17 @@ fun BridgeScreen(
                         ActionRow(
                             Icons.Rounded.PauseCircle,
                             "Paused until $until",
-                            "Helper stopped. Tap to resume now.",
+                            if (manualHelper) "Helper stopped. Resuming requires USB activation on your computer." else "Helper stopped. Tap to resume now.",
                             onResumePause,
                             trailing = Icons.Rounded.PlayArrow,
                         )
                     } else {
-                        ActionRow(Icons.Rounded.PauseCircle, "Pause for 15 minutes", "Stop the helper for 15 minutes", onPause)
+                        ActionRow(
+                            Icons.Rounded.PauseCircle,
+                            "Pause for 15 minutes",
+                            if (manualHelper) "Stops the helper; restarting requires USB activation on your computer." else "Stop the helper for 15 minutes",
+                            onPause,
+                        )
                     }
                 }
                 item {
@@ -307,7 +315,9 @@ fun BridgeScreen(
                         icon = Icons.Rounded.Bolt,
                         label = "Keep ready between sessions",
                         detail =
-                            if (rootHelper) {
+                            if (manualHelper) {
+                                "Keep the USB-activated helper running. If stopped, connect to your computer to activate again."
+                            } else if (rootHelper) {
                                 "Keep the root helper running without enabling USB debugging."
                             } else if (keepReady) {
                                 "USB debugging stays on, so your computer can connect from anywhere, including cellular."
@@ -321,12 +331,21 @@ fun BridgeScreen(
                         },
                     )
                 }
-                item { ActionRow(Icons.Rounded.PlayArrow, "Get ready now", "Start the helper so your computer can connect", onGetReady) }
+                if (!manualHelper) {
+                    item {
+                        ActionRow(
+                            Icons.Rounded.PlayArrow,
+                            "Get ready now",
+                            "Start the helper so your computer can connect",
+                            onGetReady,
+                        )
+                    }
+                }
                 item {
                     ActionRow(
                         Icons.Rounded.Lock,
                         if (rootHelper) "Stop helper now" else "Stop helper and turn USB debugging off",
-                        null,
+                        if (manualHelper) "Starting again requires USB activation on your computer." else null,
                         onLockDown,
                     )
                 }
@@ -335,15 +354,17 @@ fun BridgeScreen(
             NotificationsSection(tick = tick.intValue)
 
             Section("Settings") {
-                item {
-                    SwitchRow(
-                        Icons.Rounded.Key,
-                        "Root helper (experimental)",
-                        "Use su as UID 0, without enabling ADB. Tap Get ready now to authorize root. No app restart needed; your ADB setting is unchanged.",
-                        rootHelper,
-                    ) {
-                        rootHelper = it
-                        Prefs.setRootHelper(context, it)
+                if (!manualHelper) {
+                    item {
+                        SwitchRow(
+                            Icons.Rounded.Key,
+                            "Root helper (experimental)",
+                            "Use su as UID 0, without enabling ADB. Tap Get ready now to authorize root. No app restart needed; your ADB setting is unchanged.",
+                            rootHelper,
+                        ) {
+                            rootHelper = it
+                            Prefs.setRootHelper(context, it)
+                        }
                     }
                 }
                 item {
@@ -683,7 +704,7 @@ private fun Notice(
     icon: ImageVector,
     title: String,
     body: String,
-    action: Pair<String, () -> Unit>,
+    action: Pair<String, () -> Unit>?,
 ) {
     Surface(
         shape = RoundedCornerShape(24.dp),
@@ -697,7 +718,7 @@ private fun Notice(
                 Text(title, style = MaterialTheme.typography.titleMedium)
             }
             Text(body, style = MaterialTheme.typography.bodyMedium)
-            FilledTonalButton(onClick = action.second) { Text(action.first) }
+            if (action != null) FilledTonalButton(onClick = action.second) { Text(action.first) }
         }
     }
 }

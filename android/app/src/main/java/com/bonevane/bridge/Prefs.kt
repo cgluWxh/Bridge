@@ -42,19 +42,36 @@ object Prefs {
      * Up Over USB gets the key accepted first (see MainActivity.authorizeKey).
      */
     fun adbKeyAuthorized(ctx: Context): Boolean = prefs(ctx).getBoolean("adbKeyOk", false)
-    fun setAdbKeyAuthorized(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("adbKeyOk", on).apply()
+
+    fun setAdbKeyAuthorized(
+        ctx: Context,
+        on: Boolean,
+    ) = prefs(ctx).edit().putBoolean("adbKeyOk", on).apply()
 
     fun resetIdentity(ctx: Context) {
         // A new identity means new keys all round: the old secret went with the old ticket.
-        prefs(ctx).edit().remove("secret").remove("ticket").remove("pairSecret").apply()
+        prefs(ctx)
+            .edit()
+            .remove("secret")
+            .remove("ticket")
+            .remove("pairSecret")
+            .apply()
     }
 
     fun ticket(ctx: Context): String? = prefs(ctx).getString("ticket", null)
-    fun setTicket(ctx: Context, ticket: String) = prefs(ctx).edit().putString("ticket", ticket).apply()
+
+    fun setTicket(
+        ctx: Context,
+        ticket: String,
+    ) = prefs(ctx).edit().putString("ticket", ticket).apply()
 
     /** Start the tunnel automatically after reboot (if it was running before). */
     fun autostart(ctx: Context): Boolean = prefs(ctx).getBoolean("autostart", true)
-    fun setAutostart(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("autostart", on).apply()
+
+    fun setAutostart(
+        ctx: Context,
+        on: Boolean,
+    ) = prefs(ctx).edit().putBoolean("autostart", on).apply()
 
     /**
      * After a session ends: false = turn USB debugging off (default, safest);
@@ -67,18 +84,33 @@ object Prefs {
     fun keepReady(ctx: Context): Boolean = prefs(ctx).getBoolean("keepReady", true)
 
     /** Experimental: launch the helper as uid 0 using the user's su manager. */
-    fun rootHelper(ctx: Context): Boolean = prefs(ctx).getBoolean("rootHelper", false)
-    fun setRootHelper(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("rootHelper", on).apply()
+    fun rootHelper(ctx: Context): Boolean = !LegacyAndroid.manualHelper && prefs(ctx).getBoolean("rootHelper", false)
+
+    fun setRootHelper(
+        ctx: Context,
+        on: Boolean,
+    ) = prefs(ctx).edit().putBoolean("rootHelper", on).apply()
 
     /** When this was last changed, so the two devices can tell whose copy is newer. */
     fun keepReadyAt(ctx: Context): Long = prefs(ctx).getLong("keepReadyAt", 0)
 
-    fun setKeepReady(ctx: Context, on: Boolean, at: Long = System.currentTimeMillis()) =
-        prefs(ctx).edit().putBoolean("keepReady", on).putLong("keepReadyAt", at).apply()
+    fun setKeepReady(
+        ctx: Context,
+        on: Boolean,
+        at: Long = System.currentTimeMillis(),
+    ) = prefs(ctx)
+        .edit()
+        .putBoolean("keepReady", on)
+        .putLong("keepReadyAt", at)
+        .apply()
 
     /** "Pause for banking": USB debugging stays off until this time (epoch ms). */
     fun pausedUntil(ctx: Context): Long = prefs(ctx).getLong("pausedUntil", 0)
-    fun setPausedUntil(ctx: Context, t: Long) = prefs(ctx).edit().putLong("pausedUntil", t).apply()
+
+    fun setPausedUntil(
+        ctx: Context,
+        t: Long,
+    ) = prefs(ctx).edit().putLong("pausedUntil", t).apply()
 
     /**
      * Whether the internet tunnel should run. Off means Bluetooth only: the Mac
@@ -89,15 +121,27 @@ object Prefs {
     // over Bluetooth for a session and off again afterwards. "Anywhere" is for
     // when you'll be out of Bluetooth range and want to mirror anyway.
     fun tunnelEnabled(ctx: Context): Boolean = prefs(ctx).getBoolean("tunnelEnabled", false)
-    fun setTunnelEnabled(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("tunnelEnabled", on).apply()
+
+    fun setTunnelEnabled(
+        ctx: Context,
+        on: Boolean,
+    ) = prefs(ctx).edit().putBoolean("tunnelEnabled", on).apply()
 
     /** Whether the user last left the tunnel on. */
     fun wantRunning(ctx: Context): Boolean = prefs(ctx).getBoolean("wantRunning", false)
-    fun setWantRunning(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("wantRunning", on).apply()
+
+    fun setWantRunning(
+        ctx: Context,
+        on: Boolean,
+    ) = prefs(ctx).edit().putBoolean("wantRunning", on).apply()
 
     /** Post the status notification on a minimum-importance channel: no icon in the status bar. */
     fun quietStatus(ctx: Context): Boolean = prefs(ctx).getBoolean("quietStatus", false)
-    fun setQuietStatus(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("quietStatus", on).apply()
+
+    fun setQuietStatus(
+        ctx: Context,
+        on: Boolean,
+    ) = prefs(ctx).edit().putBoolean("quietStatus", on).apply()
 
     /** Whether the user has ever gone through setup (a ticket exists and the Mac granted the permission). */
     fun setupDone(ctx: Context): Boolean = ticket(ctx) != null && (rootHelper(ctx) || AdbToggle.isGranted(ctx))
@@ -106,19 +150,36 @@ object Prefs {
 
     /** Drop notifications Android itself showed silently (no sound, no peek). */
     fun skipSilent(ctx: Context): Boolean = prefs(ctx).getBoolean("skipSilent", true)
-    fun setSkipSilent(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("skipSilent", on).apply()
+
+    fun setSkipSilent(
+        ctx: Context,
+        on: Boolean,
+    ) = prefs(ctx).edit().putBoolean("skipSilent", on).apply()
 
     /** Drop notifications from apps whose Mac twin is open (it shows its own). */
     fun skipOpenOnMac(ctx: Context): Boolean = prefs(ctx).getBoolean("skipOpenOnMac", true)
-    fun setSkipOpenOnMac(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("skipOpenOnMac", on).apply()
+
+    fun setSkipOpenOnMac(
+        ctx: Context,
+        on: Boolean,
+    ) = prefs(ctx).edit().putBoolean("skipOpenOnMac", on).apply()
 
     /** Per-app switch; apps are on until switched off. */
-    fun appMirrored(ctx: Context, pkg: String): Boolean = pkg !in mutedApps(ctx)
-    fun setAppMirrored(ctx: Context, pkg: String, on: Boolean) {
+    fun appMirrored(
+        ctx: Context,
+        pkg: String,
+    ): Boolean = pkg !in mutedApps(ctx)
+
+    fun setAppMirrored(
+        ctx: Context,
+        pkg: String,
+        on: Boolean,
+    ) {
         val set = mutedApps(ctx).toMutableSet()
         if (on) set.remove(pkg) else set.add(pkg)
         prefs(ctx).edit().putStringSet("mutedApps", set).apply()
     }
+
     private fun mutedApps(ctx: Context): Set<String> = prefs(ctx).getStringSet("mutedApps", emptySet()) ?: emptySet()
 
     /**
@@ -129,8 +190,13 @@ object Prefs {
         (prefs(ctx).getStringSet("seenApps", emptySet()) ?: emptySet())
             .mapNotNull { it.split('\t', limit = 2).takeIf { p -> p.size == 2 }?.let { p -> p[0] to p[1] } }
             .toMap()
+
     /** A computer that has linked: its own name, "mac"/"windows", and when it was last seen. */
-    data class Computer(val name: String, val platform: String, val lastSeen: Long)
+    data class Computer(
+        val name: String,
+        val platform: String,
+        val lastSeen: Long,
+    )
 
     fun computers(ctx: Context): List<Computer> =
         (prefs(ctx).getStringSet("computers", emptySet()) ?: emptySet())
@@ -138,15 +204,31 @@ object Prefs {
             .sortedByDescending { it.lastSeen }
 
     /** Keyed by name: a renamed computer shows up once under its new name. */
-    fun rememberComputer(ctx: Context, name: String, platform: String) {
-        val clean = name.replace('\t', ' ').trim().take(60).ifEmpty { return }
+    fun rememberComputer(
+        ctx: Context,
+        name: String,
+        platform: String,
+    ) {
+        val clean =
+            name
+                .replace('\t', ' ')
+                .trim()
+                .take(60)
+                .ifEmpty { return }
         val others = computers(ctx).filter { it.name != clean }.take(9)
-        val set = (others.map { "${it.name}\t${it.platform}\t${it.lastSeen}" } +
-            "$clean\t$platform\t${System.currentTimeMillis()}").toSet()
+        val set =
+            (
+                others.map { "${it.name}\t${it.platform}\t${it.lastSeen}" } +
+                    "$clean\t$platform\t${System.currentTimeMillis()}"
+            ).toSet()
         prefs(ctx).edit().putStringSet("computers", set).apply()
     }
 
-    fun rememberApp(ctx: Context, pkg: String, label: String) {
+    fun rememberApp(
+        ctx: Context,
+        pkg: String,
+        label: String,
+    ) {
         val set = (prefs(ctx).getStringSet("seenApps", emptySet()) ?: emptySet()).toMutableSet()
         if (set.add("$pkg\t$label")) prefs(ctx).edit().putStringSet("seenApps", set).apply()
     }

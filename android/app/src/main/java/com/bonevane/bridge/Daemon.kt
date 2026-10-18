@@ -48,7 +48,7 @@ object Daemon {
     private class Session(
         val scid: String,
         val process: Process,
-        val audio: LocalSocket,
+        val audio: LocalSocket?,
         val control: LocalSocket,
     )
 
@@ -199,6 +199,8 @@ object Daemon {
                 "log_level=info",
             )
         args += options.split(' ').filter { it.isNotBlank() }
+        val audioEnabled = android.os.Build.VERSION.SDK_INT >= 30
+        if (!audioEnabled) args += "audio=false"
         val process =
             ProcessBuilder(args)
                 .apply {
@@ -220,16 +222,20 @@ object Daemon {
                 return
             }
         val audioSock =
-            connectLocal("scrcpy_$scid") ?: run {
-                videoSock.close()
-                process.destroy()
-                reply(s, "ERR audio socket")
-                return
+            if (audioEnabled) {
+                connectLocal("scrcpy_$scid") ?: run {
+                    videoSock.close()
+                    process.destroy()
+                    reply(s, "ERR audio socket")
+                    return
+                }
+            } else {
+                null
             }
         val controlSock =
             connectLocal("scrcpy_$scid") ?: run {
                 videoSock.close()
-                audioSock.close()
+                audioSock?.close()
                 process.destroy()
                 reply(s, "ERR control socket")
                 return
@@ -249,7 +255,7 @@ object Daemon {
             log("session $scid: video ended")
             sessions.remove(scid)
             runCatching { videoSock.close() }
-            runCatching { audioSock.close() }
+            runCatching { audioSock?.close() }
             runCatching { controlSock.close() }
             process.destroy()
         }
@@ -268,7 +274,13 @@ object Daemon {
         reply(s, "OK")
         // As for video: a silent phone sends nothing, so notice the hang-up.
         hangUpWhenClosed(s) { runCatching { s.close() } }
-        pump(session.audio.inputStream, s.getOutputStream())
+        val audio = session.audio
+        if (audio == null) {
+            // scrcpy's four-byte zero codec marker means audio is unavailable.
+            s.getOutputStream().write(ByteArray(4))
+            return
+        }
+        pump(audio.inputStream, s.getOutputStream())
     }
 
     /**
@@ -382,7 +394,7 @@ object Daemon {
     ) {
         val n = sessions.size
         sessions.values.toList().forEach { session ->
-            runCatching { session.audio.close() }
+            runCatching { session.audio?.close() }
             runCatching { session.control.close() }
             session.process.destroy()
         }

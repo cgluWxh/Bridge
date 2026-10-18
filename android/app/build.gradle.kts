@@ -13,10 +13,11 @@ plugins {
 //   keyPassword=…
 // Without the file, release builds fall back to the debug key so `assembleRelease`
 // still works on a fresh checkout; they just aren't shippable.
-val keystoreProps = Properties().apply {
-    val f = rootProject.file("keystore.properties")
-    if (f.exists()) f.inputStream().use { load(it) }
-}
+val keystoreProps =
+    Properties().apply {
+        val f = rootProject.file("keystore.properties")
+        if (f.exists()) f.inputStream().use { load(it) }
+    }
 
 android {
     namespace = "com.bonevane.bridge"
@@ -24,7 +25,7 @@ android {
 
     defaultConfig {
         applicationId = "com.bonevane.bridge"
-        minSdk = 30
+        minSdk = 29
         targetSdk = 35
         versionCode = 5
         versionName = "0.3.1"
@@ -71,7 +72,7 @@ android {
             useLegacyPackaging = true
             // It's not a real shared library, so don't try to strip it.
             keepDebugSymbols += "**/libdumbpipe.so"
-            keepDebugSymbols += "**/libscrcpy.so"  // scrcpy's server jar, see scripts/
+            keepDebugSymbols += "**/libscrcpy.so" // scrcpy's server jar, see scripts/
         }
     }
 }

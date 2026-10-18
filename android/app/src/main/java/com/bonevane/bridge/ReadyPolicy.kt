@@ -65,7 +65,14 @@ class ReadyPolicy(
     fun pause(minutes: Int): String {
         Prefs.setPausedUntil(ctx, System.currentTimeMillis() + minutes * 60_000L)
         DaemonManager.stop(ctx, force = true)
-        val resume = if (Prefs.keepReady(ctx)) "back in $minutes min" else "stays off"
+        val resume =
+            if (LegacyAndroid.manualHelper) {
+                "USB activation on your computer required"
+            } else if (Prefs.keepReady(ctx)) {
+                "back in $minutes min"
+            } else {
+                "stays off"
+            }
         TunnelState.log("Paused for $minutes min (helper stopped, $resume)")
         scheduleResumeCheck()
         return "paused $minutes min, helper stopped ($resume)"
@@ -81,7 +88,10 @@ class ReadyPolicy(
     /** Starts the daemon in the background if the setting says so and it's possible. */
     fun maybeStart(reason: String) {
         if (!Prefs.keepReady(ctx) || isPaused || (!Prefs.rootHelper(ctx) && !AdbToggle.isGranted(ctx))) return
-        if (DaemonManager.isDaemonAlive()) return
+        if (DaemonManager.isDaemonAlive()) {
+            LegacyAndroid.activated(ctx)
+            return
+        }
         if (!starting.compareAndSet(false, true)) return
         Thread {
             try {

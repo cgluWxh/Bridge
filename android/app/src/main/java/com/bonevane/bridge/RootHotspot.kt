@@ -19,6 +19,7 @@ object RootHotspot {
 
     /** OK<TAB>base64(SSID)<TAB>base64(password)<TAB>security, or ERR<TAB>safe error code. */
     fun start(): String {
+        if (android.os.Build.VERSION.SDK_INT < 30) return "ERR\tunsupported_android_version"
         if (android.os.Process.myUid() != 0) return "ERR\troot_required"
         if (!busy.compareAndSet(false, true)) return "ERR\tbusy"
         try {
@@ -72,9 +73,10 @@ object RootHotspot {
                         return@post
                     }
                     // WIFI_AP_STATE_ENABLED = 13. Do not restart an existing hotspot.
-                    val alreadyEnabled = runCatching {
-                        wifi.javaClass.getMethod("getWifiApState").invoke(wifi) as Int == 13
-                    }.getOrDefault(false)
+                    val alreadyEnabled =
+                        runCatching {
+                            wifi.javaClass.getMethod("getWifiApState").invoke(wifi) as Int == 13
+                        }.getOrDefault(false)
                     if (alreadyEnabled) {
                         result.set(config)
                         done.countDown()

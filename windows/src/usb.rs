@@ -171,8 +171,12 @@ fn flow(events: &Sender<Event>) -> Result<Credentials> {
     // Get adbd to trust the phone app's own ADB key (see the Mac for why):
     // TCP for a moment over the cable, the app connects to itself, the
     // "Allow USB debugging?" dialog appears for its key, then back to USB-only.
+    // Android 10 uses USB-only activation: it never bootstraps with its own
+    // key, so do not enable TCP ADB or wait for a redundant authorization.
+    let sdk = run(&adb, &["-s", serial, "shell", "getprop", "ro.build.version.sdk"]);
+    let manual_helper = sdk.trim().parse::<u32>().map(|api| api < 30).unwrap_or(false);
     let key_known = run(&adb, &["-s", serial, "shell", "content", "query", "--uri", TICKET_URI]).contains("keyOk=1");
-    if !key_known {
+    if !manual_helper && !key_known {
         progress(events, "On the phone: tap \"Always allow\" for USB debugging…");
         run(&adb, &["-s", serial, "tcpip", "5555"]);
         std::thread::sleep(Duration::from_millis(2500)); // adbd restarts
@@ -225,6 +229,9 @@ fn flow(events: &Sender<Event>) -> Result<Credentials> {
     } else {
         let tail = run(&adb, &["-s", serial, "shell", "tail -n 3 /data/local/tmp/bridge-daemon.out"]);
         crate::log!("usb", "the helper didn't come up; its log ends with: {}", tail.trim());
+        if manual_helper {
+            bail!("The USB helper didn't start. Check the phone's Bridge log and run Set up over USB again.");
+        }
     }
     // Setup switched the phone's tunnel on to mint the ticket; back to Nearby.
     run(&adb, &["-s", serial, "shell", "am", "start", "-n", ACTIVITY, "-a", "com.bonevane.bridge.NEARBY"]);
