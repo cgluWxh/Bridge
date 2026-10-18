@@ -58,6 +58,9 @@ struct App {
     /// Which entries the search box lets through, by index into files_entries.
     files_shown: Vec<usize>,
     files_filter: String,
+    pending_pushes: std::collections::VecDeque<std::path::PathBuf>,
+    push_epoch: u64,
+    active_push: Option<u64>,
     /// One transfer at a time: dropping ten files queues them rather than
     /// opening ten streams at once.
     transfer_lock: std::sync::Arc<std::sync::Mutex<()>>,
@@ -144,6 +147,9 @@ impl App {
             files_entries: Vec::new(),
             files_shown: Vec::new(),
             files_filter: String::new(),
+            pending_pushes: Default::default(),
+            push_epoch: 0,
+            active_push: None,
             transfer_lock: Default::default(),
             settings: settings::Settings::load(),
             creds: store::load().unwrap_or_default(),
@@ -463,6 +469,7 @@ impl App {
             return false;
         }
         let same = creds.ticket == self.creds.ticket && creds.secret == self.creds.secret;
+        if !same { self.cancel_pending_pushes(); }
         self.creds = creds;
         self.error = None;
         self.log("", &format!("paired {how}{}", if same { " (same ticket as before)" } else { "" }));
@@ -479,6 +486,46 @@ impl App {
     }
 
     // MARK: - Phone files
+
+    fn cancel_pending_pushes(&mut self) {
+        let count = self.pending_pushes.len();
+        self.pending_pushes.clear();
+        self.push_epoch = self.push_epoch.wrapping_add(1);
+        if count > 0 {
+            self.log("files", &format!("Cancelled {count} queued file(s); drop them again to retry."));
+        }
+    }
+
+    fn queue_push(&mut self, path: std::path::PathBuf) {
+        self.files_window.window().set_minimized(false);
+        let _ = self.files_window.show();
+        if !self.creds.is_paired() {
+            self.files_window.set_status("Pair your phone first, then drop the files again.".into());
+            return;
+        }
+        if !path.is_file() {
+            self.files_window.set_status("Drop regular files only; folders are not supported.".into());
+            return;
+        }
+        self.log("files", &format!("queued {}", path.display()));
+        self.pending_pushes.push_back(path);
+        if !self.mirroring && !self.files_session {
+            let path = self.files_path.clone();
+            self.list_files(&path);
+        }
+        self.start_next_push();
+    }
+
+    fn start_next_push(&mut self) {
+        if self.active_push.is_some() || (!self.mirroring && !self.files_session) {
+            return;
+        }
+        if let Some(path) = self.pending_pushes.pop_front() {
+            self.active_push = Some(self.push_epoch);
+            start_push_tracked(self.creds.secret.clone(), self.events_tx.clone(),
+                self.transfer_lock.clone(), path, Some(self.push_epoch));
+        }
+    }
 
     fn open_files(&mut self) {
         let _ = self.files_window.show();
@@ -1047,6 +1094,7 @@ impl App {
     }
 
     fn fail(&mut self, message: String) {
+        self.cancel_pending_pushes();
         self.log("", &format!("error: {message}"));   // the raw text, for the log
         let message = friendly(&message);
         self.connecting = false;
@@ -1072,6 +1120,7 @@ impl App {
     }
 
     fn disconnect(&mut self) {
+        self.cancel_pending_pushes();
         if !self.mirroring && !self.connecting && !self.files_session && self.tunnel.is_none() {
             return;
         }
@@ -1522,6 +1571,20 @@ impl App {
                 self.show_transfer(&text, frac);
                 return;
             }
+            Event::QueuedPushProgress(epoch, text, frac) => {
+                if epoch == self.push_epoch { self.show_transfer(&text, frac); }
+                return;
+            }
+            Event::QueuedPushDone(epoch, result) => {
+                if self.active_push == Some(epoch) { self.active_push = None; }
+                if epoch == self.push_epoch {
+                    let failed = result.is_err();
+                    if failed { self.cancel_pending_pushes(); }
+                    self.handle(Event::FileDone(result));
+                }
+                self.start_next_push();
+                return;
+            }
             Event::FileDone(result) => {
                 self.end_transfer(match &result { Ok(m) => m.clone(), Err(e) => format!("Failed: {e}") });
                 match result {
@@ -1611,6 +1674,7 @@ impl App {
                             self.window.global::<AppState>().set_busy(false);
                             let p = self.files_path.clone();
                             self.list_files(&p);
+                            self.start_next_push();
                             self.refresh();
                             return;
                         }
@@ -1624,6 +1688,7 @@ impl App {
                         }
                         self.mirroring = true;
                         self.connecting = false;
+                        self.start_next_push();
                         self.window.global::<AppState>().set_busy(false);
                         // A toast may have promoted a files-only connection;
                         // satisfy that window's pending listing as well.
@@ -1660,7 +1725,11 @@ impl App {
 /// Sends a dropped file to the phone's Download folder, on its own thread,
 /// one transfer at a time. Used by the mirror window and the files window.
 fn start_push(secret: String, tx: mpsc::Sender<Event>, lock: std::sync::Arc<std::sync::Mutex<()>>, path: std::path::PathBuf) {
-    if path.is_dir() {
+    start_push_tracked(secret, tx, lock, path, None);
+}
+
+fn start_push_tracked(secret: String, tx: mpsc::Sender<Event>, lock: std::sync::Arc<std::sync::Mutex<()>>, path: std::path::PathBuf, epoch: Option<u64>) {
+    if epoch.is_none() && path.is_dir() {
         let _ = tx.send(Event::FileDone(Err(format!("{} is a folder; drop files, not folders", path.display()))));
         return;
     }
@@ -1670,9 +1739,19 @@ fn start_push(secret: String, tx: mpsc::Sender<Event>, lock: std::sync::Arc<std:
         let ptx = tx.clone();
         let result = files::push(&secret, &path, |done, total| {
             let frac = if total > 0 { done as f32 / total as f32 } else { 1.0 };
-            let _ = ptx.send(Event::FileProgress(format!("Sending {name} · {} of {}", files::human_size(done), files::human_size(total)), frac));
+            let text = format!("Sending {name} · {} of {}", files::human_size(done), files::human_size(total));
+            let event = match epoch {
+                Some(epoch) => Event::QueuedPushProgress(epoch, text, frac),
+                None => Event::FileProgress(text, frac),
+            };
+            let _ = ptx.send(event);
         });
-        let _ = tx.send(Event::FileDone(result.map(|r| format!("{name}: {r}")).map_err(|e| format!("{name}: {e:#}"))));
+        let result = result.map(|r| format!("{name}: {r}")).map_err(|e| format!("{name}: {e:#}"));
+        let event = match epoch {
+            Some(epoch) => Event::QueuedPushDone(epoch, result),
+            None => Event::FileDone(result),
+        };
+        let _ = tx.send(event);
     });
 }
 
@@ -2009,12 +2088,17 @@ fn main() {
             use slint::winit_030::{winit::event::WindowEvent, EventResult, WinitWindowAccessor};
             files_window.window().on_winit_window_event(move |_, event| {
                 if let WindowEvent::DroppedFile(path) = event {
-                    if let Ok(app) = a.try_borrow() {
-                        if app.mirroring || app.files_session {
-                            start_push(app.creds.secret.clone(), app.events_tx.clone(), app.transfer_lock.clone(), path.clone());
-                        } else {
-                            app.files_window.set_status("Not connected yet: wait for the folder to load, then drop again.".into());
-                        }
+                    if let Ok(mut app) = a.try_borrow_mut() {
+                        app.queue_push(path.clone());
+                    }
+                }
+                EventResult::Propagate
+            });
+            let a = app.clone();
+            window.window().on_winit_window_event(move |_, event| {
+                if let WindowEvent::DroppedFile(path) = event {
+                    if let Ok(mut app) = a.try_borrow_mut() {
+                        app.queue_push(path.clone());
                     }
                 }
                 EventResult::Propagate
@@ -2025,6 +2109,7 @@ fn main() {
         let a = app.clone();
         files_window.window().on_close_requested(move || {
             if let Ok(mut app) = a.try_borrow_mut() {
+                app.cancel_pending_pushes();
                 if app.files_session && !app.mirroring {
                     app.log("files", "files window closed; ending the files session");
                     app.disconnect();

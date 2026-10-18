@@ -78,6 +78,8 @@ pub enum Event {
     /// Transfer progress: what's moving, and how far (0.0 to 1.0).
     FileProgress(String, f32),
     FileDone(Result<String, String>),
+    QueuedPushDone(u64, Result<String, String>),
+    QueuedPushProgress(u64, String, f32),
     ShareOffer(String),
     ShareFinished(Result<crate::incoming::Report, String>),
     /// A local transfer toast was clicked; never executes the received file.
