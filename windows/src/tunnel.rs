@@ -1,7 +1,7 @@
-//! The internet tunnel to the phone and the one-line control protocol over
-//! it. Same shape as the Mac: a bundled `dumbpipe.exe` listens on
-//! 127.0.0.1:7555 and forwards every connection over iroh to the phone's
-//! ControlProxy. Every stream opens with `AUTH <secret>\n` (see Pairing.kt).
+//! A transport-neutral loopback stream interface to the phone. The primary
+//! listener on 127.0.0.1:7555 selects pinned LAN TLS first, then dumbpipe/iroh.
+//! Incoming shares use independent LAN-first adapters. Every stream
+//! opens with `AUTH <secret>\n` (see Pairing.kt).
 //!
 //! dumbpipe is a separate process rather than iroh-in-process for now: it is
 //! proven against the phone, and this client can't be run on the machine it
@@ -17,7 +17,8 @@ use std::time::Duration;
 pub const LOCAL_PORT: u16 = 7555;
 
 pub struct Tunnel {
-    child: Child,
+    child: Option<Child>,
+    local: Option<crate::lan::LocalTunnel>,
 }
 
 impl Tunnel {
@@ -30,11 +31,20 @@ impl Tunnel {
         Ok(std::path::PathBuf::from("dumbpipe.exe"))
     }
 
-    pub fn start(ticket: &str) -> Result<Tunnel> {
-        Self::start_at(ticket, LOCAL_PORT)
+    pub fn start(ticket: &str, secret: &str) -> Result<Tunnel> {
+        Self::start_preferred_at(ticket, secret, LOCAL_PORT)
     }
 
-    /// Separate listeners let incoming shares outlive a mirroring session.
+    /// Independent LAN-first adapters let incoming shares outlive mirroring.
+    pub fn start_preferred_at(ticket: &str, secret: &str, port: u16) -> Result<Tunnel> {
+        Ok(Tunnel { child: None, local: Some(crate::lan::LocalTunnel::start(ticket, secret, port)?) })
+    }
+
+    pub fn transport(&self) -> &'static str {
+        self.local.as_ref().map(|l| l.transport()).unwrap_or("iroh")
+    }
+
+    /// Raw iroh listener, used internally by the LAN-first adapter's fallback.
     pub fn start_at(ticket: &str, port: u16) -> Result<Tunnel> {
         let exe = Self::dumbpipe()?;
         let mut child = Command::new(&exe)
@@ -56,23 +66,28 @@ impl Tunnel {
                 }
             });
         }
-        Ok(Tunnel { child })
+        Ok(Tunnel { child: Some(child), local: None })
     }
 
     pub fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        if let Some(local) = &self.local { return local.is_running(); }
+        self.child.as_mut().map(|c| matches!(c.try_wait(), Ok(None))).unwrap_or(false)
     }
 
     pub fn stop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        crate::log!("tunnel", "dumbpipe stopped");
+        if let Some(local) = self.local.take() { local.stop(); }
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        crate::log!("tunnel", "transport stopped");
     }
 }
 
 impl Drop for Tunnel {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        if let Some(local) = &self.local { local.stop(); }
+        if let Some(child) = self.child.as_mut() { let _ = child.kill(); }
     }
 }
 

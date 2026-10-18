@@ -141,6 +141,7 @@ class BleLink(
         /** The computer's own name and platform, from its "hello" (see [receive]). */
         @Volatile var name: String? = null
         var platform = if (plain) "windows" else "mac"
+        @Volatile var lanShare = false
         val characteristic: BluetoothGattCharacteristic? get() = if (plain) txPlain else tx
 
         @Volatile var verified = false
@@ -181,6 +182,9 @@ class BleLink(
             .map {
                 SharePeer(it.device.address, it.name ?: it.label, it.platform == "windows" && it.crypto != null)
             }.sortedBy { it.name }
+
+    fun sharePrefersLan(id: String): Boolean =
+        peers.values.any { it.device.address == id && it.verified && it.lanShare }
 
     fun offerShare(
         id: String,
@@ -547,7 +551,8 @@ class BleLink(
                 // The mode chosen on the phone (Off can't be reported: Bluetooth
                 // is off with it). Shown as an icon in the computers' top bar.
                 " mode=${if (Prefs.tunnelEnabled(context)) "anywhere" else "nearby"}" +
-                " model=${android.os.Build.MODEL.replace(' ', '_')}",
+                " model=${android.os.Build.MODEL.replace(' ', '_')}" +
+                (TunnelService.current?.lan?.status() ?: ""),
         )
     }
 
@@ -1057,6 +1062,7 @@ class BleLink(
             // The Mac can switch the tunnel on from across the room, so the phone
             // can sit in the cheap Bluetooth-only mode until mirroring is wanted.
             when (message.trim()) {
+                "lan-share on" -> peer.lanShare = true
                 "tunnel on" -> {
                     TunnelState.log("Mac asked for the tunnel over Bluetooth")
                     TunnelService.setTunnel(context, true, remember = false)

@@ -45,8 +45,9 @@ pub fn upload_image(secret: &str, expected_sequence: u32) -> anyhow::Result<bool
     Ok(true)
 }
 
-/// Read/encode on the BLE writer, never on the UI thread.
-pub fn ble_png(expected: u32) -> anyhow::Result<Vec<u8>> {
+/// Read/encode on the clipboard writer, never on the UI thread.
+/// The tighter 1 MiB BLE limit is applied only after LAN is unavailable.
+pub fn sync_png(expected: u32) -> anyhow::Result<Vec<u8>> {
     use anyhow::{bail, Context};
     if sequence() != expected { bail!("clipboard changed"); }
     let image = Clipboard::new()?.get_image()?;
@@ -57,7 +58,7 @@ pub fn ble_png(expected: u32) -> anyhow::Result<Vec<u8>> {
     let mut png = std::io::Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(rgba).write_to(&mut png, image::ImageFormat::Png)?;
     let png = png.into_inner();
-    if png.len() > 1024 * 1024 { bail!("BLE image exceeds 1 MiB"); }
+    if png.len() > 32 * 1024 * 1024 { bail!("Image exceeds 32 MiB PNG limit"); }
     if sequence() != expected { bail!("clipboard changed"); }
     Ok(png)
 }

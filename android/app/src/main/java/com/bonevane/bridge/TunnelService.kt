@@ -137,6 +137,8 @@ class TunnelService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
     private var proxy: ControlProxy? = null
+    var lan: LanServer? = null
+        private set
     var policy: ReadyPolicy? = null
         private set
     var ble: BleLink? = null
@@ -278,6 +280,7 @@ class TunnelService : Service() {
             ControlProxy(this).also { p ->
                 runCatching { p.start() }.onFailure { TunnelState.log("Proxy failed: ${it.message}") }
             }
+        lan = LanServer(this).also { it.start() }
         policy = ReadyPolicy(this).also { it.start() }
         ble = BleLink(this).also { runCatching { it.start() }.onFailure { e -> TunnelState.log("Bluetooth: ${e.message}") } }
         // Copying on the phone reaches the Mac through here (see ClipboardWatcher).
@@ -453,6 +456,8 @@ class TunnelService : Service() {
         worker?.interrupt()
         worker = null
         killDumbpipe()
+        lan?.stop()
+        lan = null
         proxy?.stop()
         proxy = null
         policy?.stop()

@@ -20,6 +20,7 @@ mod clipboard;
 mod files;
 mod hotspot;
 mod incoming;
+mod lan;
 mod log;
 mod notify;
 mod protocol;
@@ -469,7 +470,7 @@ impl App {
             return false;
         }
         let same = creds.ticket == self.creds.ticket && creds.secret == self.creds.secret;
-        if !same { self.cancel_pending_pushes(); }
+        if !same { self.cancel_pending_pushes(); lan::clear(); }
         self.creds = creds;
         self.error = None;
         self.log("", &format!("paired {how}{}", if same { " (same ticket as before)" } else { "" }));
@@ -866,18 +867,16 @@ impl App {
         self.woke_tunnel = false;
         self.window.global::<AppState>().set_busy(true);
         self.refresh();
-        let need_wake = self.linked && !self.phone_tunnel_on;
+        if let Some(b) = &self.ble { let _ = b.send_command("status"); }
         if !self.linked {
             // We can't see the phone's state without Bluetooth; say what's needed
             // rather than waiting half a minute for a tunnel that may be off.
             // If the link comes up while we're trying, handle() wakes it then.
             self.log("", "no Bluetooth link yet: mirroring needs the phone's tunnel, or Bluetooth to wake it");
         }
-        if need_wake {
-            self.wake_phone_tunnel();
-        }
         let ticket = self.creds.ticket.clone();
-        match tunnel::Tunnel::start(&ticket) {
+        let secret = self.creds.secret.clone();
+        match tunnel::Tunnel::start(&ticket, &secret) {
             Ok(t) => self.tunnel = Some(t),
             Err(e) => {
                 self.log("tunnel", &format!("{e:#}"));
@@ -886,16 +885,12 @@ impl App {
             }
         }
         // START over the tunnel, on a thread: dumbpipe needs a moment to find the phone.
-        let secret = self.creds.secret.clone();
         let events = self.events_tx.clone();
         let current = self.attempt.clone();
         std::thread::spawn(move || {
-            if need_wake {
-                std::thread::sleep(Duration::from_secs(4)); // let the phone reach a relay
-            }
             let mut result = Err("the phone didn't answer over the tunnel".to_string());
             for try_ in 1..=12 {
-                std::thread::sleep(Duration::from_secs(2));
+                if try_ > 1 { std::thread::sleep(Duration::from_secs(2)); }
                 if current.load(Ordering::SeqCst) != attempt {
                     return; // cancelled, or superseded by a newer Connect
                 }
@@ -923,6 +918,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let tx_close = tx.clone();
         let window = MirrorWindow::new()?;
+        window.set_transport(self.tunnel.as_ref().map(|t| t.transport()).unwrap_or("iroh").into());
         // Frames land on the UI thread straight from the video thread. If the
         // UI hasn't drawn the last one yet, the newer frame replaces it: we
         // want the latest picture, not every picture.
@@ -1198,6 +1194,12 @@ impl App {
             w.set_bar_awake(self.mirror_pointer.get().elapsed() < Duration::from_secs(3));
         }
         self.poll_session();
+        let transport = self.tunnel.as_ref().map(|t| t.transport()).unwrap_or("Disconnected");
+        self.files_window.set_transport(transport.into());
+        if let Some(window) = &self.mirror_window { window.set_transport(transport.into()); }
+        if self.connecting && transport == "iroh" && self.linked && !self.phone_tunnel_on {
+            self.wake_phone_tunnel();
+        }
         if self.settings.sync_clipboard && (self.linked || self.mirroring) {
             if let Some(text) = self.clipboard.poll() {
                 if self.last_synced.as_deref() == Some(text.as_str()) {
@@ -1345,8 +1347,15 @@ impl App {
                     }
                 }
             }
+            Event::ShareNeedsTunnel => {
+                if let Some(b) = &self.ble {
+                    let _ = b.send_command("tunnel on");
+                    self.log("share", "LAN unavailable; waking iroh over Bluetooth");
+                }
+            }
             Event::ShareOffer(token) => {
                 if self.creds.is_paired() {
+                    if let Some(b) = &self.ble { let _ = b.send_command("status"); }
                     incoming::start(self.creds.ticket.clone(), self.creds.secret.clone(), token, self.events_tx.clone());
                     self.log("files", "Receiving a phone share in the background");
                 }
@@ -1412,10 +1421,12 @@ impl App {
                 if let Some(b) = &self.ble {
                     // Who we are, for the phone's Computers list and chips.
                     let _ = b.send_command(&format!("hello windows {}", computer_name()));
+                    let _ = b.send_command("lan-share on");
                     let _ = b.send_command("status");
                 }
             }
             Event::Dropped(why) => {
+                lan::clear();
                 self.linked = false;
                 self.last_twins = None;
                 self.log("bluetooth", &format!("dropped ({why})"));
@@ -1658,10 +1669,11 @@ impl App {
                 }
             }
             Event::Status(fields) => {
+                lan::update(&self.creds.secret, &fields);
                 self.phone_status = fields.clone();
                 self.phone_tunnel_on = fields.get("tunnel").map(|v| v == "1").unwrap_or(false);
                 self.phone_paused = fields.get("paused").map(|v| v == "1").unwrap_or(false);
-                if self.connecting && !self.phone_tunnel_on {
+                if self.connecting && !self.phone_tunnel_on && self.tunnel.as_ref().map(|t| t.transport()) == Some("iroh") {
                     // Bluetooth came up after Mirror was clicked: now we can see
                     // the tunnel is off, and switch it on.
                     self.wake_phone_tunnel();

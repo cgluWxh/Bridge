@@ -81,6 +81,8 @@ pub enum Event {
     QueuedPushDone(u64, Result<String, String>),
     QueuedPushProgress(u64, String, f32),
     ShareOffer(String),
+    /// LAN-first incoming share selected iroh and needs the phone's tunnel.
+    ShareNeedsTunnel,
     ShareFinished(Result<crate::incoming::Report, String>),
     /// A local transfer toast was clicked; never executes the received file.
     RevealReceived(std::path::PathBuf),
@@ -198,13 +200,14 @@ impl Ble {
                 image_reply: None,
             }));
         let writer_link = link.clone();
+        let writer_secret = secret.to_string();
         std::thread::spawn(move || {
             for job in outbox_rx {
                 let (kind, text) = match job {
                     Outgoing::Text(k, t) => (k, t),
                     Outgoing::Image(seq) => {
-                        if let Err(e) = transfer_image(&writer_link, seq) {
-                            crate::log!("clipboard", "BLE image: {e:#}");
+                        if let Err(e) = transfer_image(&writer_link, seq, &writer_secret) {
+                            crate::log!("clipboard", "image sync: {e:#}");
                         }
                         continue;
                     }
@@ -450,8 +453,13 @@ fn image_wait(link: &Arc<Mutex<Link>>, seq: u32, expected: &str) -> Result<()> {
     }
 }
 
-fn transfer_image(link: &Arc<Mutex<Link>>, seq: u32) -> Result<()> {
-    let png = crate::clipboard::ble_png(seq)?;
+fn transfer_image(link: &Arc<Mutex<Link>>, seq: u32, secret: &str) -> Result<()> {
+    let png = crate::clipboard::sync_png(seq)?;
+    if crate::lan::send_image(secret, seq, &png)? { return Ok(()); }
+    if png.len() > 1024 * 1024 {
+        crate::notify::show("Bridge", "Image not synchronized", "LAN unavailable. This image exceeds the 1 MiB BLE limit.");
+        bail!("LAN unavailable; image exceeds BLE's 1 MiB limit");
+    }
     link.lock().unwrap().image_reply = None;
     let result = (|| -> Result<()> {
         image_message(link, &format!("begin {seq} {}", png.len()))?;

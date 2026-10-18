@@ -29,6 +29,7 @@ object ImageClipboard {
         context: Context,
         socket: Socket,
         header: String,
+        requireMirror: Boolean = true,
     ) {
         socket.soTimeout = 60_000
         val out = socket.getOutputStream()
@@ -39,9 +40,13 @@ object ImageClipboard {
         }
         var file: File? = null
         try {
-            check(TunnelState.mirroring) { "Mirroring is not active" }
+            if (requireMirror) {
+                check(TunnelState.mirroring) { "Mirroring is not active" }
+            } else {
+                check(context.getSystemService(android.os.PowerManager::class.java).isInteractive) { "SCREEN_OFF" }
+            }
             val size = header.trim().toLongOrNull() ?: error("Invalid image length")
-            require(size in 1..MAX_BYTES) { "Image exceeds 32 MB limit" }
+            require(size in 1..MAX_BYTES) { "Image exceeds size limit" }
             val dir = directory(context)
             // Retain previous images for 24 h: a chat app may read its URI later.
             dir
@@ -60,14 +65,14 @@ object ImageClipboard {
                 val buffer = ByteArray(128 * 1024)
                 var left = size
                 while (left > 0) {
-                    check(TunnelState.mirroring) { "Mirroring ended" }
+                    if (requireMirror) check(TunnelState.mirroring) { "Mirroring ended" }
                     val n = input.read(buffer, 0, minOf(left, buffer.size.toLong()).toInt())
                     check(n > 0) { "Incomplete image" }
                     output.write(buffer, 0, n)
                     left -= n
                 }
             }
-            check(TunnelState.mirroring) { "Mirroring ended" }
+            if (requireMirror) check(TunnelState.mirroring) { "Mirroring ended" }
             publish(context, target)
             file = null // Published: retain for delayed reads, even if ACK is lost.
             reply("OK")
@@ -79,20 +84,23 @@ object ImageClipboard {
     }
 
     /** Shared by tunnel and BLE; publishing does not require a mirror or a lit screen. */
-    fun publish(context: Context, target: File) {
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(target.path, bounds)
-            require(
-                bounds.outMimeType == "image/png" && bounds.outWidth > 0 && bounds.outHeight > 0 &&
-                    bounds.outWidth.toLong() * bounds.outHeight <= 40_000_000,
-            ) { "Invalid or oversized PNG" }
-            val uri = Uri.parse("$PREFIX${target.name}")
-            // Android grants the focused clipboard consumer access through the
-            // provider's grantUriPermissions contract. Do not grant every app.
-            context
-                .getSystemService(
-                    ClipboardManager::class.java,
-                ).setPrimaryClip(ClipData.newUri(context.contentResolver, "PC screenshot", uri))
+    fun publish(
+        context: Context,
+        target: File,
+    ) {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(target.path, bounds)
+        require(
+            bounds.outMimeType == "image/png" && bounds.outWidth > 0 && bounds.outHeight > 0 &&
+                bounds.outWidth.toLong() * bounds.outHeight <= 40_000_000,
+        ) { "Invalid or oversized PNG" }
+        val uri = Uri.parse("$PREFIX${target.name}")
+        // Android grants the focused clipboard consumer access through the
+        // provider's grantUriPermissions contract. Do not grant every app.
+        context
+            .getSystemService(
+                ClipboardManager::class.java,
+            ).setPrimaryClip(ClipData.newUri(context.contentResolver, "PC screenshot", uri))
     }
 }
 

@@ -637,7 +637,8 @@ component BarGap inherits Rectangle {
 // key event goes to the phone as a scrcpy control message (see scrcpy.rs).
 export component MirrorWindow inherits Window {
     in-out property <string> phone-name: "Phone";
-    title: root.phone-name + " (Bridge)";
+    in-out property <string> transport: "Connecting";
+    title: root.phone-name + " (Bridge · " + root.transport + ")";
     background: black;
     in-out property <image> frame;
     in-out property <length> video-width: 1080px;
@@ -761,7 +762,8 @@ export struct FileEntry {
 // open it, a file to download it into this PC's Downloads folder. Files
 // dropped on this window go to the phone's Download folder.
 export component FilesWindow inherits Window {
-    title: "Phone files";
+    in-out property <string> transport: "Disconnected";
+    title: "Phone files · " + root.transport;
     preferred-width: 520px;
     min-width: 340px;
     preferred-height: 620px;

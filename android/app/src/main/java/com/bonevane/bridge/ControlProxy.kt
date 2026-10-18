@@ -98,6 +98,12 @@ class ControlProxy(
                     ImageClipboard.receive(ctx, it, readLine(input, 80).orEmpty())
                 }
 
+                // Background image clipboard: same payload, but screen-on admission
+                // instead of requiring a mirroring session. READY is the ACK.
+                "IMGB" -> {
+                    ImageClipboard.receive(ctx, it, readLine(input, 80).orEmpty(), requireMirror = false)
+                }
+
                 "SHAR" -> {
                     // App-owned URI shares: never forward these to the shell daemon.
                     val token = readLine(input, 100)?.trim().orEmpty()

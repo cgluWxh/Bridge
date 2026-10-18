@@ -59,6 +59,8 @@ cpal = "0.15"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 anyhow = "1"
 chrono = "0.4"
+# LAN TLS uses Windows Schannel; the peer certificate is pinned via encrypted BLE.
+native-tls = "0.2"
 
 [build-dependencies]
 slint-build = "1.18"

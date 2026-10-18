@@ -338,11 +338,15 @@ class ShareService : Service() {
             check(!cancelled) { "Cancelled" }
             if (files.any { it != null }) {
                 token = UUID.randomUUID().toString().replace("-", "")
-                TunnelService.setTunnel(this, true, remember = false)
+                val ble = TunnelService.current?.ble
+                // Updated clients request iroh only after LAN discovery fails.
+                // Older clients still expect the phone to start iroh before the offer.
+                if (ble?.sharePrefersLan(peer) != true) TunnelService.setTunnel(this, true, remember = false)
+                ble?.sendStatus()
                 ShareTransfer.phase(this, "Waiting for computer…")
                 // A directed, encrypted BLE offer; only the selected peer gets the capability.
                 lastProgress = SystemClock.elapsedRealtime()
-                check(TunnelService.current?.ble?.offerShare(peer, token) == true) { "Computer disconnected" }
+                check(ble?.offerShare(peer, token) == true) { "Computer disconnected" }
                 // Timeout on *inactivity*, not total duration: large files may take hours.
                 while (!completed.await(5, TimeUnit.SECONDS)) {
                     check(!cancelled) { "Cancelled" }

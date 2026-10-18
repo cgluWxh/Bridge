@@ -158,16 +158,27 @@ pub fn start(ticket: String, secret: String, token: String, events: std::sync::m
     std::thread::spawn(move || {
         let result = (|| -> anyhow::Result<Report> {
             let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
-            let mut tunnel = crate::tunnel::Tunnel::start_at(&ticket, port)?;
+            let mut tunnel = crate::tunnel::Tunnel::start_preferred_at(&ticket, &secret, port)?;
+            let mut requested_tunnel = false;
             let started = std::time::Instant::now();
             let mut stream = loop {
                 if !tunnel.is_running() { anyhow::bail!("File sharing tunnel stopped"); }
+                if tunnel.transport() == "Connecting" {
+                    if started.elapsed().as_secs() >= 60 { anyhow::bail!("File sharing discovery timed out"); }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    continue;
+                }
+                if tunnel.transport() == "iroh" && !requested_tunnel {
+                    let _ = events.send(crate::ble::Event::ShareNeedsTunnel);
+                    requested_tunnel = true;
+                }
                 match crate::tunnel::Stream::open_at(&secret, std::time::Duration::from_secs(60), port) {
                     Ok(s) => break s,
                     Err(e) if started.elapsed().as_secs() >= 60 => return Err(e),
                     Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
                 }
             };
+            crate::log!("share", "receiving phone files over {}", tunnel.transport());
             stream.write_all(format!("SHAR {token}\n").as_bytes())?;
             Ok(receive(&mut stream, &crate::files::downloads_dir())?)
         })().map_err(|e| format!("Phone share interrupted: {e:#}. Check the report on your phone."));
