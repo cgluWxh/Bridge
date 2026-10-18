@@ -199,6 +199,17 @@ impl Ble {
                 stopped: false,
                 image_reply: None,
             }));
+        let status_link = Arc::downgrade(&link);
+        crate::lan::register_status_requester(secret, Arc::new(move |request| {
+            let link = status_link.upgrade().ok_or_else(|| "BLE link was replaced".to_string())?;
+            let mut l = link.lock().unwrap();
+            if !l.verified || l.stopped { return Err("BLE peer is not authenticated/connected".into()); }
+            let payload = l.crypto.as_mut().ok_or_else(|| "BLE encrypted session unavailable".to_string())?
+                .seal(format!("status {request}").as_bytes());
+            // Independent of the outbox: a clipboard image job can itself be
+            // waiting for this response on the normal writer thread.
+            write_chunks(&l, Kind::Command, &payload).map_err(|e| format!("BLE status write failed: {e:#}"))
+        }));
         let writer_link = link.clone();
         let writer_secret = secret.to_string();
         std::thread::spawn(move || {
@@ -842,7 +853,9 @@ fn receive(bytes: &[u8], link: &Arc<Mutex<Link>>, events: &Sender<Event>, secret
             let _ = events.send(Event::Clipboard(text));
         }
         Kind::Status => {
-            let _ = events.send(Event::Status(protocol::parse_status(&text)));
+            let fields = protocol::parse_status(&text);
+            crate::lan::update(secret, &fields);
+            let _ = events.send(Event::Status(fields));
         }
         Kind::Share => {
             if text.len() == 32 && text.bytes().all(|b| b.is_ascii_hexdigit()) {

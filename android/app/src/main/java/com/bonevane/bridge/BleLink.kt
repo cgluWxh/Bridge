@@ -529,7 +529,7 @@ class BleLink(
      * Tells the Mac what works right now. Doubles as the heartbeat, so the Mac's
      * picture of the phone is never more than 30 s stale.
      */
-    fun sendStatus() {
+    fun sendStatus(lanRequest: String? = null) {
         // A Mac on the Bluetooth link is very much still there, even though it
         // hasn't spoken over the tunnel. Without this the idle watchdog decides
         // it vanished and locks the phone down, which quietly kills the daemon
@@ -553,7 +553,8 @@ class BleLink(
                 // is off with it). Shown as an icon in the computers' top bar.
                 " mode=${if (Prefs.tunnelEnabled(context)) "anywhere" else "nearby"}" +
                 " model=${android.os.Build.MODEL.replace(' ', '_')}" +
-                (TunnelService.current?.lan?.status() ?: ""),
+                (TunnelService.current?.lan?.status() ?: "") +
+                (lanRequest?.let { " lan_request=$it" } ?: ""),
         )
     }
 
@@ -1084,6 +1085,9 @@ class BleLink(
                 }
 
                 "status" -> {
+                    // Only an authenticated incoming request, not automatic
+                    // sendStatus()/heartbeats, starts a short LAN wake lease.
+                    TunnelService.current?.prewarmLan()
                     sendStatus()
                 }
 
@@ -1107,6 +1111,15 @@ class BleLink(
                 // "keep on at=<millis>" carries a timestamp, so it can't match exactly.
                 else -> {
                     when {
+                        message.startsWith("status ") -> {
+                            val request = message.removePrefix("status ").trim()
+                            if (request.matches(Regex("[a-f0-9]{32}"))) {
+                                // Reply correlation prevents an automatic heartbeat
+                                // or an earlier request from bypassing prewarm.
+                                TunnelService.current?.prewarmLan()
+                                sendStatus(request)
+                            }
+                        }
                         message.startsWith("hotspot ") -> {
                             val id = message.removePrefix("hotspot ").trim()
                             if (id.matches(Regex("[a-f0-9]{32}"))) {

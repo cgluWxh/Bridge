@@ -11,7 +11,17 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 struct Candidate { addr: SocketAddr, pin: Vec<u8> }
-struct Advertisement { secret: String, seen: Instant, candidates: Vec<Candidate>, issue: Option<&'static str> }
+struct Advertisement { candidates: Vec<Candidate>, issue: Option<&'static str> }
+type StatusRequester = Arc<dyn Fn(&str) -> std::result::Result<(), String> + Send + Sync>;
+static STATUS_REQUESTER: OnceLock<Mutex<Option<(String, StatusRequester)>>> = OnceLock::new();
+struct PendingStatus { secret: String, reply: std::sync::mpsc::Sender<Advertisement> }
+static PENDING_STATUS: OnceLock<Mutex<HashMap<String, PendingStatus>>> = OnceLock::new();
+fn pending_status() -> &'static Mutex<HashMap<String, PendingStatus>> { PENDING_STATUS.get_or_init(|| Mutex::new(HashMap::new())) }
+struct StatusWait(String);
+impl Drop for StatusWait { fn drop(&mut self) { pending_status().lock().unwrap().remove(&self.0); } }
+pub fn register_status_requester(secret: &str, requester: StatusRequester) {
+    *STATUS_REQUESTER.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some((secret.into(), requester));
+}
 #[derive(Clone, Copy)]
 struct Timeouts { ble_wait: Duration, tcp_connect: Duration, probe: Duration }
 impl Timeouts {
@@ -28,16 +38,17 @@ impl Timeouts {
     // apply to the next connection without mutating an in-flight deadline.
     fn load() -> Self { Self::from_settings(&crate::settings::Settings::load()) }
 }
-static DISCOVERY: OnceLock<Mutex<Option<Advertisement>>> = OnceLock::new();
-fn discovery() -> &'static Mutex<Option<Advertisement>> { DISCOVERY.get_or_init(|| Mutex::new(None)) }
-
-/// Only call with a status received through the verified BLE session.
+/// Called directly from the authenticated BLE receive callback, not through the
+/// UI event queue: an image worker can wait for this while its outbox is busy.
 pub fn update(secret: &str, fields: &HashMap<String, String>) {
-    let candidates = parse_candidates(fields);
-    let issue = advertisement_issue(fields);
-    *discovery().lock().unwrap() = Some(Advertisement { secret: secret.into(), seen: Instant::now(), candidates, issue });
+    let Some(request) = fields.get("lan_request") else { return }; // unsolicited heartbeat is not a reply
+    let mut pending = pending_status().lock().unwrap();
+    if !pending.get(request).map(|p| p.secret == secret).unwrap_or(false) { return; }
+    if let Some(waiter) = pending.remove(request) {
+        let _ = waiter.reply.send(Advertisement { candidates: parse_candidates(fields), issue: advertisement_issue(fields) });
+    }
 }
-pub fn clear() { *discovery().lock().unwrap() = None; }
+pub fn clear() { pending_status().lock().unwrap().clear(); }
 fn parse_candidates(fields: &HashMap<String, String>) -> Vec<Candidate> {
     let Some(port) = fields.get("lan_port").and_then(|p| p.parse::<u16>().ok()).filter(|p| *p != 0) else { return vec![] };
     let Some(pin) = fields.get("lan_fp").and_then(|p| hex::decode(p).ok()).filter(|p| p.len() == 32) else { return vec![] };
@@ -145,28 +156,38 @@ fn select(secret: &str, stop: &AtomicBool) -> std::result::Result<Candidate, Str
     let timeouts = Timeouts::load();
     let started = Instant::now();
     crate::log!("transport", "LAN selection budgets: BLE {} ms, TCP {} ms, parallel probe {} ms", timeouts.ble_wait.as_millis(), timeouts.tcp_connect.as_millis(), timeouts.probe.as_millis());
-    // Existing fresh advertisements take the fast path; no mandatory wait.
+    let requester = STATUS_REQUESTER.get_or_init(|| Mutex::new(None)).lock().unwrap().as_ref()
+        .filter(|(paired, _)| paired == secret).map(|(_, send)| send.clone())
+        .ok_or_else(|| "no BLE status requester for this pairing; cached addresses are not allowed".to_string())?;
+    let request = crate::protocol::nonce();
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    pending_status().lock().unwrap().insert(request.clone(), PendingStatus { secret: secret.into(), reply: reply_tx });
+    let _wait = StatusWait(request.clone());
     let until = started + timeouts.ble_wait;
+    let send_failed = Arc::new(Mutex::new(None));
+    let worker_failed = send_failed.clone();
+    // Never block the UI or selection deadline on a slow native BLE write.
+    std::thread::spawn(move || {
+        if Instant::now() >= until { return; }
+        if let Err(reason) = requester(&request) { *worker_failed.lock().unwrap() = Some(reason); }
+    });
+    crate::log!("transport", "LAN: requesting fresh BLE endpoint; waiting for matching reply before any TCP probe");
     let candidates = loop {
         if stop.load(Ordering::Relaxed) { return Err("selection cancelled".into()); }
-        {
-            let cached = discovery().lock().unwrap();
-            if let Some(a) = cached.as_ref() {
-                if a.secret == secret && a.seen.elapsed() < Duration::from_secs(90) && !a.candidates.is_empty() {
-                    break a.candidates.clone();
-                }
-            }
-            if Instant::now() >= until {
-                let reason = match cached.as_ref() {
-                    None => "no authenticated BLE status received",
-                    Some(a) if a.secret != secret => "cached BLE advertisement belongs to different pairing",
-                    Some(a) if a.seen.elapsed() >= Duration::from_secs(90) => "BLE LAN advertisement expired (older than 90 s)",
-                    Some(a) => a.issue.unwrap_or("BLE status contains no LAN candidates"),
-                };
-                return Err(format!("BLE address wait timed out after {} ms: {reason}", timeouts.ble_wait.as_millis()));
-            }
+        if let Some(reason) = send_failed.lock().unwrap().take() { return Err(format!("BLE address request failed: {reason}")); }
+        if Instant::now() >= until {
+            return Err(format!("BLE address wait timed out after {} ms: no matching status reply (phone must support correlated LAN status); cached addresses not used", timeouts.ble_wait.as_millis()));
         }
-        std::thread::sleep(Duration::from_millis(10));
+        match reply_rx.recv_timeout(Duration::from_millis(20).min(until.saturating_duration_since(Instant::now()))) {
+            Ok(advertisement) => {
+                if let Some(issue) = advertisement.issue { return Err(format!("fresh BLE status: {issue}")); }
+                if advertisement.candidates.is_empty() { return Err("fresh BLE reply has no usable IPv4 address".into()); }
+                crate::log!("transport", "LAN: matching fresh BLE endpoint received after {} ms", started.elapsed().as_millis());
+                break advertisement.candidates;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err("BLE address request cancelled or link dropped".into()),
+            Err(_) => {}
+        }
     };
     let count = candidates.len();
     crate::log!("transport", "LAN: {} candidate(s), BLE wait {} ms; parallel probe budget {} ms, TCP cap {} ms", count, started.elapsed().as_millis(), timeouts.probe.as_millis(), timeouts.tcp_connect.as_millis());
@@ -205,12 +226,6 @@ fn select(secret: &str, stop: &AtomicBool) -> std::result::Result<Candidate, Str
     Err(format!("{summary}; {failed}/{count} failures reported, {} pending; first failure: {}", count - failed, first_failure.as_deref().unwrap_or("none (probes did not complete before deadline)")))
 }
 
-fn advertised(secret: &str) -> bool {
-    discovery().lock().unwrap().as_ref().map(|a|
-        a.secret == secret && a.seen.elapsed() < Duration::from_secs(90) && !a.candidates.is_empty()
-    ).unwrap_or(false)
-}
-
 fn image_reply(stream: &mut impl Read, sequence: u32) -> Result<String> {
     let mut bytes = Vec::new();
     let mut byte = [0];
@@ -232,7 +247,6 @@ fn image_reply(stream: &mut impl Read, sequence: u32) -> Result<String> {
 /// Call only AFTER BLE admission. False means LAN is unreachable, so the
 /// still-unused grant can be consumed by BLE begin instead.
 pub fn send_image(secret: &str, sequence: u32, png: &[u8], grant: &str) -> Result<bool> {
-    if !advertised(secret) { return Ok(false); }
     let candidate = match select(secret, &AtomicBool::new(false)) {
         Ok(candidate) => candidate,
         Err(reason) => {
@@ -483,6 +497,33 @@ mod tests {
         fields.insert("lan_fp".into(), "ab".repeat(32));
         fields.insert("lan_ips".into(), "::1,127.0.0.1".into());
         assert_eq!(advertisement_issue(&fields), Some("no usable advertised IPv4 address"));
+    }
+
+    #[test]
+    fn status_reply_requires_matching_request_and_pairing() {
+        let request = crate::protocol::nonce();
+        let (tx, rx) = std::sync::mpsc::channel();
+        pending_status().lock().unwrap().insert(request.clone(), PendingStatus { secret: "test-pair".into(), reply: tx });
+        let _wait = StatusWait(request.clone());
+        let mut fields = HashMap::from([
+            ("lan_port".into(), "12345".into()),
+            ("lan_fp".into(), "ab".repeat(32)),
+            ("lan_ips".into(), "192.168.1.5".into()),
+        ]);
+        update("test-pair", &fields); // heartbeat
+        assert!(rx.try_recv().is_err());
+        fields.insert("lan_request".into(), crate::protocol::nonce());
+        update("test-pair", &fields); // another connection's reply
+        assert!(rx.try_recv().is_err());
+        fields.insert("lan_request".into(), request);
+        update("wrong-pair", &fields);
+        assert!(rx.try_recv().is_err());
+        update("test-pair", &fields);
+        let reply = rx.try_recv().unwrap();
+        assert!(reply.issue.is_none());
+        assert_eq!(reply.candidates[0].addr.to_string(), "192.168.1.5:12345");
+        update("test-pair", &fields); // reply cannot satisfy a second waiter
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

@@ -392,7 +392,8 @@ class ShareService : Service() {
         socket = client
         lastProgress = SystemClock.elapsedRealtime()
         client.soTimeout = 60_000
-        if (TunnelState.openStreams.incrementAndGet() == 1) TunnelService.current?.holdWifiAwake(true)
+        TunnelState.openStreams.incrementAndGet()
+        TunnelService.current?.refreshBusinessPower()
         try {
             val output = client.getOutputStream()
             val input = client.getInputStream()
@@ -475,7 +476,8 @@ class ShareService : Service() {
             // Only confirmed files count as success; all other rows are finalized below.
         } finally {
             socket = null
-            if (TunnelState.openStreams.decrementAndGet() == 0) TunnelService.current?.holdWifiAwake(false)
+            TunnelState.openStreams.decrementAndGet()
+            TunnelService.current?.refreshBusinessPower()
             completed.countDown()
         }
         return true

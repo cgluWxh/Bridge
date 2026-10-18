@@ -135,7 +135,7 @@ class TunnelService : Service() {
     private val startedProcesses = java.util.Collections.synchronizedList(mutableListOf<Process>())
     private var worker: Thread? = null
     private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
+    private var lanPower: LanPower? = null
     private var proxy: ControlProxy? = null
     var lan: LanServer? = null
         private set
@@ -273,6 +273,7 @@ class TunnelService : Service() {
 
     private fun launch() {
         active = true
+        lanPower = LanPower(this)
         TunnelState.addListener(statusListener)
         TunnelState.running = true
         // Tunnel streams land on the proxy, which sorts ADB traffic from commands.
@@ -329,38 +330,20 @@ class TunnelService : Service() {
         TunnelState.tunnelOn = false
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
-        holdWifiAwake(false)
+        refreshBusinessPower()
         TunnelState.ticket = null
         TunnelState.update("Bluetooth only. The tunnel is off.", ready = false)
         ble?.sendStatus()
     }
 
-    /**
-     * Holds the Wi-Fi radio out of power-saving *only while a session is running*.
-     * It's what stops an idle radio adding ~150 ms to the first packet after a
-     * gap, but it's a high-power mode, so holding it all day would be wasteful.
-     */
-    @Synchronized fun holdWifiAwake(hold: Boolean) {
-        if (hold && wifiLock == null) {
-            val wifi = applicationContext.getSystemService(android.net.wifi.WifiManager::class.java)
-            val mode =
-                if (Build.VERSION.SDK_INT >= 29) {
-                    android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-                } else {
-                    @Suppress("DEPRECATION")
-                    android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF
-                }
-            wifiLock =
-                wifi
-                    .createWifiLock(mode, "Bridge::wifi")
-                    .apply {
-                        setReferenceCounted(false)
-                        acquire()
-                    }
-        } else if (!hold) {
-            wifiLock?.let { if (it.isHeld) it.release() }
-            wifiLock = null
-        }
+    /** A verified peer explicitly asked for status: warm LAN without starting iroh. */
+    @Synchronized fun prewarmLan() {
+        if (active) lanPower?.prewarm()
+    }
+
+    /** Reconcile against the shared count, not an out-of-order true/false callback. */
+    @Synchronized fun refreshBusinessPower() {
+        if (active) lanPower?.refreshBusiness()
     }
 
     /**
@@ -450,6 +433,8 @@ class TunnelService : Service() {
         ShareTransfer.cancel()
         TunnelState.removeListener(statusListener)
         active = false
+        lanPower?.close()
+        lanPower = null
         tunnelActive = false
         TunnelState.running = false
         TunnelState.tunnelOn = false
@@ -467,8 +452,6 @@ class TunnelService : Service() {
         clipboard?.stop()
         clipboard = null
         current = null
-        wifiLock?.let { if (it.isHeld) it.release() }
-        wifiLock = null
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
         TunnelState.update("Stopped", ready = false)

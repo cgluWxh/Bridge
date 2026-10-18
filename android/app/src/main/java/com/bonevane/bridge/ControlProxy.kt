@@ -71,18 +71,8 @@ class ControlProxy(
                 n += r
             }
             when (String(head)) {
-                "PUSH" -> {
-                    if (TunnelState.openStreams.incrementAndGet() == 1) {
-                        TunnelService.current?.holdWifiAwake(true)
-                    }
-                    try {
-                        ReceivedFiles.receive(ctx, it)
-                    } finally {
-                        if (TunnelState.openStreams.decrementAndGet() == 0) {
-                            TunnelService.current?.holdWifiAwake(false)
-                        }
-                        TunnelState.macSeen()
-                    }
+                "PUSH" -> withBusinessPower {
+                    ReceivedFiles.receive(ctx, it)
                 }
 
                 "VIDE", "AUDI", "CTRL", "CLIP", "INST", "LIST", "PULL" -> {
@@ -94,13 +84,15 @@ class ControlProxy(
                     notifications(it)
                 }
 
-                "IMGC" -> {
+                "IMGC" -> withBusinessPower {
+                    it.soTimeout = 60_000
                     ImageClipboard.receive(ctx, it, readLine(input, 80).orEmpty())
                 }
 
                 // IMGB <size> <one-use BLE grant>: screen admission happened
                 // over BLE before any LAN probing. READY confirms grant consumption.
-                "IMGB" -> {
+                "IMGB" -> withBusinessPower {
+                    it.soTimeout = 60_000
                     ImageClipboard.receive(ctx, it, readLine(input, 80).orEmpty(), requireMirror = false)
                 }
 
@@ -117,6 +109,19 @@ class ControlProxy(
         }
     }
 
+    /** Only authenticated business requests; STATUS probes never enter here. */
+    private fun withBusinessPower(block: () -> Unit) {
+        TunnelState.openStreams.incrementAndGet()
+        try {
+            TunnelService.current?.refreshBusinessPower()
+            block()
+        } finally {
+            TunnelState.openStreams.decrementAndGet()
+            TunnelService.current?.refreshBusinessPower()
+            TunnelState.macSeen()
+        }
+    }
+
     /** Session streams go to the shell-uid daemon, which relays scrcpy-server's sockets. */
     private fun pipeToDaemon(
         client: Socket,
@@ -124,18 +129,16 @@ class ControlProxy(
     ) {
         // A session's worth of traffic is starting: keep the radio responsive
         // while it lasts, and let it idle again afterwards.
-        if (TunnelState.openStreams.incrementAndGet() == 1) {
-            TunnelService.current?.holdWifiAwake(true)
-        }
+        TunnelState.openStreams.incrementAndGet()
+        TunnelService.current?.refreshBusinessPower()
         // The video stream is what "mirroring" means on the phone's screen.
         val video = String(head) == "VIDE"
         if (video && TunnelState.videoStreams.incrementAndGet() == 1) TunnelState.notifyListeners()
         try {
             pipeToDaemonInner(client, head)
         } finally {
-            if (TunnelState.openStreams.decrementAndGet() == 0) {
-                TunnelService.current?.holdWifiAwake(false)
-            }
+            TunnelState.openStreams.decrementAndGet()
+            TunnelService.current?.refreshBusinessPower()
             if (video && TunnelState.videoStreams.decrementAndGet() == 0) TunnelState.notifyListeners()
             TunnelState.macSeen()
         }

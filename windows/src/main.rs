@@ -880,7 +880,8 @@ impl App {
         self.woke_tunnel = false;
         self.window.global::<AppState>().set_busy(true);
         self.refresh();
-        if let Some(b) = &self.ble { let _ = b.send_command("status"); }
+        // The LAN adapter issues its own correlated status request and waits
+        // for that reply before probing any address.
         if !self.linked {
             // We can't see the phone's state without Bluetooth; say what's needed
             // rather than waiting half a minute for a tunnel that may be off.
@@ -1368,7 +1369,6 @@ impl App {
             }
             Event::ShareOffer(token) => {
                 if self.creds.is_paired() {
-                    if let Some(b) = &self.ble { let _ = b.send_command("status"); }
                     incoming::start(self.creds.ticket.clone(), self.creds.secret.clone(), token, self.events_tx.clone());
                     self.log("files", "Receiving a phone share in the background");
                 }
@@ -1682,7 +1682,6 @@ impl App {
                 }
             }
             Event::Status(fields) => {
-                lan::update(&self.creds.secret, &fields);
                 self.phone_status = fields.clone();
                 self.phone_tunnel_on = fields.get("tunnel").map(|v| v == "1").unwrap_or(false);
                 self.phone_paused = fields.get("paused").map(|v| v == "1").unwrap_or(false);
