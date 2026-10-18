@@ -140,6 +140,12 @@
             </intent-filter>
         </service>
 
+        <provider
+            android:name=".ImageClipboardProvider"
+            android:authorities="com.bonevane.bridge.images"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
         <!-- Lets the Mac read the ticket over USB via `adb shell content query`.
              The provider itself refuses anyone except adb shell. -->
         <provider

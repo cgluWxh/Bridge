@@ -66,3 +66,26 @@ notifications that were already shown before the switch changed.
 Replying and dismissing keep their existing behavior. File-receipt notifications
 still open Explorer. This starts the screen view only; it does not automatically
 open the specific notification's app on Android. Bridge must still be running.
+
+## Paste a PC screenshot into the mirrored phone (experimental)
+
+Update both apps. Take a Windows screenshot **to the clipboard**, focus the
+Android chat input in the mirror window, and press **Ctrl+V**. Bridge uploads the
+clipboard bitmap as PNG, sets a grantable image URI on Android's clipboard, and
+only after the phone acknowledges it requests Android's Paste action. This does
+not press Send, switch apps, or launch a share sheet. If there is no bitmap, the
+normal text Ctrl+V path is retained. Image-file copies from Explorer are not
+specifically supported by this prototype.
+
+The Android chat app must support image URI clipboard paste and the Android
+Paste key action. If no preview appears, try the input's long-press **Paste**:
+that distinguishes a keyboard-action issue from image clipboard incompatibility.
+A successful upload does not prove that the chat app accepted the image.
+
+Uploads only start from the mirror's Ctrl+V, not from background clipboard
+watching. Closing/replacing the mirror, changing the Windows clipboard, or moving
+focus to another PC window cancels the automatic paste. Wait for upload before
+changing the Android input target. Errors show a toast and never paste stale
+content. Limits: 40 megapixels, 32 MB encoded PNG, 256 MB phone image cache; images
+are retained for delayed app reads and cleaned after 24 hours on a later upload.
+The URI provider is read-only and non-exported, with Android clipboard URI grants.

@@ -80,6 +80,10 @@ class ControlProxy(
                     notifications(it)
                 }
 
+                "IMGC" -> {
+                    ImageClipboard.receive(ctx, it, readLine(input, 80).orEmpty())
+                }
+
                 "SHAR" -> {
                     // App-owned URI shares: never forward these to the shell daemon.
                     val token = readLine(input, 100)?.trim().orEmpty()

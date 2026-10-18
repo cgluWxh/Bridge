@@ -929,6 +929,10 @@ impl App {
             sess.send(&scrcpy::scroll(scrcpy::Position { x, y, width: w, height: h }, dx / 20.0, dy / 20.0));
         });
         let s3 = s.clone();
+        let paste_events = self.events_tx.clone();
+        let paste_secret = self.creds.secret.clone();
+        let paste_attempt = self.attempt.load(std::sync::atomic::Ordering::SeqCst);
+        let paste_held = std::cell::Cell::new(false);
         window.on_key(move |text, mods, down| {
             let Some(sess) = s3.borrow().clone() else { return };
             let text = text.to_string();
@@ -936,6 +940,19 @@ impl App {
             let shift = mods & 2 != 0;
             let alt = mods & 4 != 0;
             use scrcpy::android_key as k;
+            if text.eq_ignore_ascii_case("v") && (ctrl || paste_held.get()) {
+                if !down { paste_held.set(false); return; }
+                if paste_held.replace(true) { return; } // ignore auto-repeat
+                if clipboard::IMAGE_PASTE_BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+                let tx = paste_events.clone();
+                let secret = paste_secret.clone();
+                let sequence = clipboard::sequence();
+                std::thread::spawn(move || {
+                    let result = clipboard::upload_image(&secret, sequence).map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(Event::ImagePasteReady { attempt: paste_attempt, sequence, result });
+                });
+                return; // never paste old clipboard while image upload is pending
+            }
             // Ctrl+letter shortcuts, the Mac's ⌘ ones.
             if ctrl {
                 let target = match text.as_str() {
@@ -1203,6 +1220,7 @@ impl App {
                     }
                 }
                 SessionEvent::Clipboard(text) => {
+                    if clipboard::IMAGE_PASTE_BUSY.load(std::sync::atomic::Ordering::SeqCst) || clipboard::image_uri(&text) { continue; }
                     if self.settings.sync_clipboard && self.last_synced.as_deref() != Some(text.as_str()) {
                         self.last_synced = Some(text.clone());
                         self.clipboard.set(&text);
@@ -1227,6 +1245,35 @@ impl App {
 
     fn handle(&mut self, event: Event) {
         match event {
+            Event::ImagePasteReady { attempt, sequence, result } => {
+                clipboard::IMAGE_PASTE_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+                if attempt != self.attempt.load(std::sync::atomic::Ordering::SeqCst) || !self.mirroring {
+                    return; // closed/replaced mirror: never paste into a new session
+                }
+                match result {
+                    Ok(image) => {
+                        if clipboard::sequence() != sequence || !self.mirror_window.as_ref().map(|w| w.window().is_active()).unwrap_or(false) {
+                            notify::show("Bridge", "Paste cancelled", "Clipboard or focused window changed. Focus the chat and paste again.");
+                            return;
+                        }
+                        if let Some(session) = &self.session {
+                            if image {
+                                // Android KEYCODE_PASTE: no Enter/send, no app switching.
+                                session.send(&scrcpy::key(true, 279, 0));
+                                session.send(&scrcpy::key(false, 279, 0));
+                                self.log("clipboard", "image clipboard ready; requested paste (app support required)");
+                            } else {
+                                session.send(&scrcpy::key(true, 50, scrcpy::android_key::META_CTRL));
+                                session.send(&scrcpy::key(false, 50, scrcpy::android_key::META_CTRL));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.log("clipboard", &format!("Image paste failed: {error}"));
+                        notify::show("Bridge", "Image paste failed", &error);
+                    }
+                }
+            }
             Event::ShareOffer(token) => {
                 if self.creds.is_paired() {
                     incoming::start(self.creds.ticket.clone(), self.creds.secret.clone(), token, self.events_tx.clone());
@@ -1519,6 +1566,7 @@ impl App {
                 }
             }
             Event::Clipboard(text) => {
+                if clipboard::IMAGE_PASTE_BUSY.load(std::sync::atomic::Ordering::SeqCst) || clipboard::image_uri(&text) { return; }
                 if self.settings.sync_clipboard {
                     self.log("clipboard", &format!("from the phone ({} chars)", text.chars().count()));
                     self.clipboard.set(&text);

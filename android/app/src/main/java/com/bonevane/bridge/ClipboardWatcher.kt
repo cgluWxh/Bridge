@@ -16,8 +16,9 @@ import java.net.Socket
  * Needs the daemon, i.e. USB debugging on. With the phone locked down, use the
  * "Send clipboard" tile instead, which works with no privileges at all.
  */
-class ClipboardWatcher(private val ble: () -> BleLink?) {
-
+class ClipboardWatcher(
+    private val ble: () -> BleLink?,
+) {
     @Volatile private var active = false
     private var socket: Socket? = null
     private var thread: Thread? = null
@@ -30,8 +31,12 @@ class ClipboardWatcher(private val ble: () -> BleLink?) {
     @Synchronized fun start() {
         if (thread?.isAlive == true) return
         active = true
-        thread = Thread({ loop() }, "clipboard-watcher")
-            .apply { isDaemon = true; start() }
+        thread =
+            Thread({ loop() }, "clipboard-watcher")
+                .apply {
+                    isDaemon = true
+                    start()
+                }
     }
 
     fun stop() {
@@ -50,7 +55,7 @@ class ClipboardWatcher(private val ble: () -> BleLink?) {
                 if (active) TunnelState.log("Clipboard watch ended: ${t.message}")
             }
             try {
-                Thread.sleep(15_000)              // daemon may be down; try again
+                Thread.sleep(15_000) // daemon may be down; try again
             } catch (e: InterruptedException) {
                 if (!active) return
             }
@@ -72,10 +77,18 @@ class ClipboardWatcher(private val ble: () -> BleLink?) {
         val input = DataInputStream(s.getInputStream())
         val output = s.getOutputStream()
 
-        output.write((Pairing.authLine(AppContext.value) + "\n").toByteArray()); output.flush()
-        if (readLine(input).startsWith("bridge-daemon").not()) { s.close(); return }   // the daemon's hello
-        output.write("CLIP\n".toByteArray()); output.flush()
-        if (readLine(input) != "OK") { s.close(); return }
+        output.write((Pairing.authLine(AppContext.value) + "\n").toByteArray())
+        output.flush()
+        if (readLine(input).startsWith("bridge-daemon").not()) {
+            s.close()
+            return
+        } // the daemon's hello
+        output.write("CLIP\n".toByteArray())
+        output.flush()
+        if (readLine(input) != "OK") {
+            s.close()
+            return
+        }
         TunnelState.log("Watching the clipboard for changes")
 
         // scrcpy's device → client messages; type 0 is a clipboard change.
@@ -89,16 +102,27 @@ class ClipboardWatcher(private val ble: () -> BleLink?) {
                     val text = String(ByteArray(length).also { input.readFully(it) })
                     forward(text)
                 }
-                1 -> input.skipBytes(8)                       // clipboard ack
-                2 -> input.skipBytes(input.readUnsignedShort().let { input.readUnsignedShort() })
-                else -> break
+
+                1 -> {
+                    input.skipBytes(8)
+                }
+
+                // clipboard ack
+                2 -> {
+                    input.skipBytes(input.readUnsignedShort().let { input.readUnsignedShort() })
+                }
+
+                else -> {
+                    break
+                }
             }
         }
         runCatching { s.close() }
     }
 
     private fun forward(text: String) {
-        if (text.isEmpty() || text == lastValue) return       // don't echo the Mac back at itself
+        if (text.startsWith(ImageClipboard.PREFIX)) return // image URI is not clipboard text
+        if (text.isEmpty() || text == lastValue) return // don't echo the Mac back at itself
         lastValue = text
         val link = ble()
         if (link?.connected == true) {

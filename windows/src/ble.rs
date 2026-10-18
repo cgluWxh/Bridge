@@ -69,6 +69,7 @@ pub enum Event {
     Status(std::collections::HashMap<String, String>),
     /// From the tunnel thread: which Connect attempt, and START's reply or why it failed.
     Connected(u32, Result<String, String>),
+    ImagePasteReady { attempt: u32, sequence: u32, result: Result<bool, String> },
     /// Set up over USB (usb.rs): a step started, then the outcome.
     UsbProgress(String),
     UsbDone(Result<crate::store::Credentials, String>),
