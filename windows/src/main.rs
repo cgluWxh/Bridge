@@ -880,8 +880,8 @@ impl App {
         self.woke_tunnel = false;
         self.window.global::<AppState>().set_busy(true);
         self.refresh();
-        // The LAN adapter issues its own correlated status request and waits
-        // for that reply before probing any address.
+        // The LAN adapter races cached endpoints with its own correlated
+        // status request, then retries fresh endpoints once if needed.
         if !self.linked {
             // We can't see the phone's state without Bluetooth; say what's needed
             // rather than waiting half a minute for a tunnel that may be off.

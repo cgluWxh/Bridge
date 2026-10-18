@@ -2,28 +2,33 @@
 
 Only a verified peer's explicit BLE `status` or `status <request-id>` command
 triggers prewarm. Automatic status broadcasts and the 30-second heartbeat do not
-acquire locks. Windows now waits for the matching fresh status reply before any
-LAN TCP probing; addresses within that reply are still probed in parallel.
+acquire locks. Windows races cached-address probes with the BLE request; a failed
+cache round is followed by one full retry using the matching fresh reply.
 
 ## Windows connection order
 
-1. Register a unique 32-hex request ID and send encrypted BLE `status <request-id>`.
+1. Register a unique 32-hex request ID and send encrypted BLE `status <request-id>`
+   while probing cached addresses (same pairing, younger than 90 seconds). Cache
+   success returns immediately; the BLE request does not gate that success.
 2. Android prewarms CPU/Wi-Fi, reads the current listener/IP information, and
    returns a status containing `lan_request=<request-id>`, IPs, port and TLS pin.
 3. Windows accepts only the matching authenticated reply for the paired phone.
    Heartbeats, cached endpoints and other selections' replies cannot satisfy it.
    The reply is delivered directly in the BLE callback, independently of the UI
    event queue and image outbox worker.
-4. Probe only those newly returned addresses in parallel: TCP, pinned TLS, and
-   authenticated STATUS. First successful candidate wins; active business streams
-   subsequently connect to the selected endpoint and take over the power locks.
+4. If cache failed, use the queued matching reply or wait only for the remaining
+   original BLE deadline. Probe every freshly returned address in parallel,
+   including endpoints already tried. No third round. Each round checks TCP,
+   pinned TLS and authenticated STATUS. Active business streams subsequently
+   connect to the selected endpoint and take over the power locks.
 5. Missing/invalid replies or failed LAN probes fall back to iroh for tunnels;
    clipboard images use their existing BLE fallback/size limit instead.
 
 Default budgets are 1500 ms for the fresh BLE reply, 2000 ms TCP per candidate,
-and 5000 ms total parallel probing after the reply. These are maximum waits,
-not fixed delays. Update both Windows and Android: an older phone that does not
-echo request IDs cannot pass this barrier and will use the fallback.
+and 3000 ms per parallel probe round (at most two rounds, about 6 seconds total
+with cache). These are maximum waits, not fixed delays. Saved custom values remain
+unchanged. Update both Windows and Android for the correlated fresh-address retry;
+older phones may still connect through cache but cannot supply a matching retry.
 
 - Prewarm: partial CPU wake lock and Wi-Fi HIGH_PERF hint for a 10-second lease.
   Another explicit request refreshes that lease instead of stacking references.

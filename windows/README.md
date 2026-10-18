@@ -94,15 +94,23 @@ The URI provider is read-only and non-exported, with Android clipboard URI grant
 
 **Settings → Phone → LAN connection timeouts** controls new connections:
 
-- BLE address wait: **1.5 s** by default (skipped when a fresh endpoint is cached).
-- TCP connect limit: **2 s** per candidate, capped by the remaining probe budget.
-- Parallel LAN probe budget: **5 s**, shared by TCP, TLS and AUTH/STATUS.
+- BLE address wait: **1.5 s** by default, concurrent with cached-address probing.
+- TCP connect limit: **2 s** per candidate, capped by the remaining round budget.
+- LAN probe budget per round: **3 s**, shared by TCP, TLS and AUTH/STATUS.
 
-Thus initial LAN selection can take up to about **6.5 s** before iroh fallback,
-not including iroh startup. A successful probe returns immediately. All candidates
-are probed in parallel, so the budget is not multiplied by the number of IPs.
-The settings are persisted in `settings.json`; old configurations use the new
-defaults. Active streams are not interrupted. Changing settings does not move an
+Cached endpoints (same pairing, younger than 90 seconds) are tried immediately
+while a correlated BLE status request prewarms the phone. Cache success returns
+immediately. After cache failure, wait for that reply only until its original BLE
+deadline; a reply already received remains usable. All freshly returned addresses
+get exactly one full retry, even addresses tried in the cached round. No third
+round is attempted. Missing/invalid replies or failed fresh probes select iroh.
+
+Default selection takes at most about **6 s** before iroh fallback, excluding
+iroh startup. More generally the bound is `max(round budget, BLE wait) + round
+budget` with cached addresses, or `BLE wait + round budget` without them.
+Candidates within each round are parallel; success always returns immediately.
+The settings are persisted in `settings.json`; missing keys use the new
+defaults, but previously saved values are preserved. Active streams are not interrupted. Changing settings does not move an
 existing iroh tunnel to LAN: reconnect to try LAN again.
 
 The log records configured/effective budgets and candidate failures, plus the

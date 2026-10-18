@@ -24,7 +24,7 @@ pub struct Settings {
     pub sync_dismiss: bool,
     pub lan_ble_wait_ms: i32,
     pub lan_tcp_connect_ms: i32,
-    /// TCP + TLS + AUTH/STATUS share this parallel probe deadline.
+    /// TCP + TLS + AUTH/STATUS share this deadline per round (cache, then fresh).
     pub lan_probe_ms: i32,
 }
 
@@ -48,7 +48,7 @@ impl Default for Settings {
             sync_dismiss: true,
             lan_ble_wait_ms: 1500,
             lan_tcp_connect_ms: 2000,
-            lan_probe_ms: 5000,
+            lan_probe_ms: 3000,
         }
     }
 }
