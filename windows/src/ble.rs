@@ -155,6 +155,7 @@ struct Link {
     /// rather than finish (it would subscribe and answer the challenge with
     /// a secret that may since have changed, and hold CONNECTING meanwhile).
     stopped: bool,
+    image_reply: Option<String>,
 }
 
 /// One connect attempt at a time: a rescan mid-attempt used to start a second.
@@ -168,12 +169,17 @@ pub struct Ble {
     /// Outgoing messages. A writer thread drains this, so a slow or dead
     /// link never blocks the window (a write to a bonded phone could take
     /// 60 s to time out, and it used to do so on the UI thread).
-    outbox: Sender<(Kind, String)>,
+    outbox: Sender<Outgoing>,
+}
+
+enum Outgoing {
+    Text(Kind, String),
+    Image(u32),
 }
 
 impl Ble {
     pub fn new(secret: &str, events: Sender<Event>) -> Self {
-        let (outbox, outbox_rx) = std::sync::mpsc::channel::<(Kind, String)>();
+        let (outbox, outbox_rx) = std::sync::mpsc::channel::<Outgoing>();
         let link = Arc::new(Mutex::new(Link {
                 device: None,
                 rx: None,
@@ -189,10 +195,20 @@ impl Ble {
                 mtu_payload: 20,
                 crypto: None,
                 stopped: false,
+                image_reply: None,
             }));
         let writer_link = link.clone();
         std::thread::spawn(move || {
-            for (kind, text) in outbox_rx {
+            for job in outbox_rx {
+                let (kind, text) = match job {
+                    Outgoing::Text(k, t) => (k, t),
+                    Outgoing::Image(seq) => {
+                        if let Err(e) = transfer_image(&writer_link, seq) {
+                            crate::log!("clipboard", "BLE image: {e:#}");
+                        }
+                        continue;
+                    }
+                };
                 let mut l = writer_link.lock().unwrap();
                 if !l.verified && kind != Kind::Command {
                     continue; // nobody to talk to; the message is stale anyway
@@ -396,12 +412,78 @@ impl Ble {
         if !self.link.lock().unwrap().verified && kind != Kind::Command {
             bail!("not linked");
         }
-        self.outbox.send((kind, text.to_string())).map_err(|_| anyhow!("writer gone"))
+        self.outbox.send(Outgoing::Text(kind, text.to_string())).map_err(|_| anyhow!("writer gone"))
+    }
+
+    pub fn send_image(&self, sequence: u32) -> Result<()> {
+        self.outbox.send(Outgoing::Image(sequence)).map_err(|_| anyhow!("writer gone"))
     }
 
     pub fn send_command(&self, text: &str) -> Result<()> {
         self.send(Kind::Command, text)
     }
+}
+
+// Each image block is a complete encrypted message. Cancellation never leaves
+// the ordinary message reassembler half full; subsequent text remains valid.
+fn image_message(link: &Arc<Mutex<Link>>, text: &str) -> Result<()> {
+    let mut l = link.lock().unwrap();
+    if !l.verified || l.stopped { bail!("disconnected"); }
+    let payload = l.crypto.as_mut().ok_or_else(|| anyhow!("no encrypted session"))?.seal(text.as_bytes());
+    write_chunks(&l, Kind::ClipboardImage, &payload)
+}
+
+fn image_wait(link: &Arc<Mutex<Link>>, seq: u32, expected: &str) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        if crate::clipboard::sequence() != seq { bail!("clipboard changed"); }
+        {
+            let mut l = link.lock().unwrap();
+            if !l.verified || l.stopped { bail!("disconnected"); }
+            if let Some(reply) = l.image_reply.take() {
+                if reply == expected { return Ok(()); }
+                if reply.starts_with(&format!("{seq} ")) { bail!("phone: {reply}"); }
+            }
+        }
+        if start.elapsed() > Duration::from_secs(15) { bail!("image acknowledgement timeout"); }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn transfer_image(link: &Arc<Mutex<Link>>, seq: u32) -> Result<()> {
+    let png = crate::clipboard::ble_png(seq)?;
+    link.lock().unwrap().image_reply = None;
+    let result = (|| -> Result<()> {
+        image_message(link, &format!("begin {seq} {}", png.len()))?;
+        image_wait(link, seq, &format!("{seq} ACK"))?;
+        for (offset, block) in png.chunks(384).enumerate() {
+            if crate::clipboard::sequence() != seq { bail!("clipboard changed"); }
+            if let Some(reply) = link.lock().unwrap().image_reply.take() {
+                if reply.starts_with(&format!("{seq} NACK")) { bail!("phone: {reply}"); }
+            }
+            image_message(link, &format!("data {seq} {} {}", offset * 384, image_base64(block)))?;
+        }
+        if crate::clipboard::sequence() != seq { bail!("clipboard changed"); }
+        image_message(link, &format!("end {seq}"))?;
+        image_wait(link, seq, &format!("{seq} OK"))?;
+        crate::log!("clipboard", "image synchronized over BLE ({} bytes)", png.len());
+        Ok(())
+    })();
+    if result.is_err() { let _ = image_message(link, &format!("abort {seq}")); }
+    result
+}
+
+fn image_base64(bytes: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in bytes.chunks(3) {
+        let n = ((c[0] as u32) << 16) | ((c.get(1).copied().unwrap_or(0) as u32) << 8) | c.get(2).copied().unwrap_or(0) as u32;
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(if c.len() > 1 { T[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if c.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+    }
+    out
 }
 
 fn write_chunks(l: &Link, kind: Kind, payload: &[u8]) -> Result<()> {
@@ -715,6 +797,7 @@ fn receive(bytes: &[u8], link: &Arc<Mutex<Link>>, events: &Sender<Event>, secret
         None => String::from_utf8_lossy(&raw).into_owned(),
     };
     match kind {
+        Kind::ClipboardImage => { l.image_reply = Some(text); }
         Kind::Notification => {
             if let Some(n) = protocol::parse_notification(&text) {
                 let _ = events.send(Event::Notification(n));
@@ -819,6 +902,20 @@ fn hstring(s: &str) -> HSTRING {
 mod hotspot_tests {
     use super::*;
     const ID: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn image_blocks_roundtrip_and_fit_receiver_limit() {
+        assert_eq!(image_base64(b"f"), "Zg==");
+        assert_eq!(image_base64(b"fo"), "Zm8=");
+        assert_eq!(image_base64(b"foo"), "Zm9v");
+        for len in 0..=384 {
+            let bytes: Vec<u8> = (0..len).map(|n| n as u8).collect();
+            let encoded = image_base64(&bytes);
+            assert!(encoded.len() <= 512);
+            assert_eq!(base64_decode(&encoded).unwrap(), bytes);
+        }
+        assert_eq!(Kind::from_byte(13), Some(Kind::ClipboardImage));
+    }
 
     #[test]
     fn directed_credentials_and_redacted_debug() {

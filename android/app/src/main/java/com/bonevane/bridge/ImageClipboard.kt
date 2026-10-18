@@ -67,20 +67,8 @@ object ImageClipboard {
                     left -= n
                 }
             }
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(target.path, bounds)
-            require(
-                bounds.outMimeType == "image/png" && bounds.outWidth > 0 && bounds.outHeight > 0 &&
-                    bounds.outWidth.toLong() * bounds.outHeight <= 40_000_000,
-            ) { "Invalid or oversized PNG" }
             check(TunnelState.mirroring) { "Mirroring ended" }
-            val uri = Uri.parse("$PREFIX${target.name}")
-            // Android grants the focused clipboard consumer access through the
-            // provider's grantUriPermissions contract. Do not grant every app.
-            context
-                .getSystemService(
-                    ClipboardManager::class.java,
-                ).setPrimaryClip(ClipData.newUri(context.contentResolver, "PC screenshot", uri))
+            publish(context, target)
             file = null // Published: retain for delayed reads, even if ACK is lost.
             reply("OK")
         } catch (e: Exception) {
@@ -88,6 +76,23 @@ object ImageClipboard {
         } finally {
             file?.delete()
         }
+    }
+
+    /** Shared by tunnel and BLE; publishing does not require a mirror or a lit screen. */
+    fun publish(context: Context, target: File) {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(target.path, bounds)
+            require(
+                bounds.outMimeType == "image/png" && bounds.outWidth > 0 && bounds.outHeight > 0 &&
+                    bounds.outWidth.toLong() * bounds.outHeight <= 40_000_000,
+            ) { "Invalid or oversized PNG" }
+            val uri = Uri.parse("$PREFIX${target.name}")
+            // Android grants the focused clipboard consumer access through the
+            // provider's grantUriPermissions contract. Do not grant every app.
+            context
+                .getSystemService(
+                    ClipboardManager::class.java,
+                ).setPrimaryClip(ClipData.newUri(context.contentResolver, "PC screenshot", uri))
     }
 }
 

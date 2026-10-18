@@ -30,6 +30,8 @@ pub enum Kind {
     Hotspot = 11,
     /// Single-use file share offer, directed to this computer.
     Share = 12,
+    /// Cancellable image transfer control and base64 blocks.
+    ClipboardImage = 13,
 }
 
 impl Kind {
@@ -47,6 +49,7 @@ impl Kind {
             10 => Kind::Art,
             11 => Kind::Hotspot,
             12 => Kind::Share,
+            13 => Kind::ClipboardImage,
             _ => return None,
         })
     }

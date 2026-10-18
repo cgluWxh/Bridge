@@ -1215,6 +1215,12 @@ impl App {
                 }
             }
         }
+        if let Some(sequence) = self.clipboard.pending_image.take() {
+            self.last_synced = None;
+            if self.settings.sync_clipboard && self.linked && !self.mirroring {
+                if let Some(b) = &self.ble { let _ = b.send_image(sequence); }
+            }
+        }
         if let Some(at) = self.retry_ble_at {
             if Instant::now() >= at && self.ble.is_none() {
                 self.retry_ble_at = None;

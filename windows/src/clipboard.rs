@@ -45,8 +45,26 @@ pub fn upload_image(secret: &str, expected_sequence: u32) -> anyhow::Result<bool
     Ok(true)
 }
 
+/// Read/encode on the BLE writer, never on the UI thread.
+pub fn ble_png(expected: u32) -> anyhow::Result<Vec<u8>> {
+    use anyhow::{bail, Context};
+    if sequence() != expected { bail!("clipboard changed"); }
+    let image = Clipboard::new()?.get_image()?;
+    let pixels = image.width.checked_mul(image.height).context("invalid image size")?;
+    if pixels == 0 || pixels > 40_000_000 { bail!("image exceeds 40 megapixels"); }
+    let rgba = image::RgbaImage::from_raw(image.width as u32, image.height as u32, image.bytes.into_owned())
+        .context("invalid pixels")?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(rgba).write_to(&mut png, image::ImageFormat::Png)?;
+    let png = png.into_inner();
+    if png.len() > 1024 * 1024 { bail!("BLE image exceeds 1 MiB"); }
+    if sequence() != expected { bail!("clipboard changed"); }
+    Ok(png)
+}
+
 pub struct Watcher {
     last_seq: u32,
+    pub pending_image: Option<u32>,
     /// The last text we put on the clipboard ourselves (or sent), so a
     /// change that is just our own write isn't echoed back to the phone.
     pub last_synced: Option<String>,
@@ -54,7 +72,7 @@ pub struct Watcher {
 
 impl Watcher {
     pub fn new() -> Self {
-        Watcher { last_seq: unsafe { GetClipboardSequenceNumber() }, last_synced: None }
+        Watcher { last_seq: unsafe { GetClipboardSequenceNumber() }, last_synced: None, pending_image: None }
     }
 
     /// Returns new text if the clipboard changed to something we didn't write.
@@ -68,7 +86,12 @@ impl Watcher {
         let mut clipboard = Clipboard::new().ok()?;
         // Screenshot tools may publish text alongside pixels: never sync that
         // text over the image clipboard we are about to paste on Android.
-        if clipboard.get_image().is_ok() { return None; }
+        if clipboard.get_image().is_ok() {
+            self.last_synced = None;
+            self.pending_image = Some(seq);
+            return None;
+        }
+        self.pending_image = None;
         let text = clipboard.get_text().ok()?;
         if text.is_empty() || self.last_synced.as_deref() == Some(text.as_str()) {
             return None;
