@@ -11,14 +11,18 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 struct Candidate { addr: SocketAddr, pin: Vec<u8> }
-struct Advertisement { secret: String, seen: Instant, candidates: Vec<Candidate> }
+struct Advertisement { secret: String, seen: Instant, candidates: Vec<Candidate>, issue: Option<&'static str> }
+const BLE_WAIT: Duration = Duration::from_secs(1);
+const LAN_PROBE: Duration = Duration::from_millis(2400);
+const TCP_CONNECT: Duration = Duration::from_millis(800);
 static DISCOVERY: OnceLock<Mutex<Option<Advertisement>>> = OnceLock::new();
 fn discovery() -> &'static Mutex<Option<Advertisement>> { DISCOVERY.get_or_init(|| Mutex::new(None)) }
 
 /// Only call with a status received through the verified BLE session.
 pub fn update(secret: &str, fields: &HashMap<String, String>) {
     let candidates = parse_candidates(fields);
-    *discovery().lock().unwrap() = Some(Advertisement { secret: secret.into(), seen: Instant::now(), candidates });
+    let issue = advertisement_issue(fields);
+    *discovery().lock().unwrap() = Some(Advertisement { secret: secret.into(), seen: Instant::now(), candidates, issue });
 }
 pub fn clear() { *discovery().lock().unwrap() = None; }
 fn parse_candidates(fields: &HashMap<String, String>) -> Vec<Candidate> {
@@ -30,65 +34,158 @@ fn parse_candidates(fields: &HashMap<String, String>) -> Vec<Candidate> {
         .map(|ip| Candidate { addr: SocketAddr::from((ip, port)), pin: pin.clone() }).collect()
 }
 
+/// Fixed descriptions only: do not log the BLE payload, pin, or pairing secret.
+fn advertisement_issue(fields: &HashMap<String, String>) -> Option<&'static str> {
+    if !fields.contains_key("lan_port") && !fields.contains_key("lan_fp") && !fields.contains_key("lan_ips") {
+        return Some("BLE status contains no LAN endpoint (listener not ready or phone build lacks LAN)");
+    }
+    if fields.get("lan_port").and_then(|v| v.parse::<u16>().ok()).filter(|p| *p != 0).is_none() {
+        return Some("missing or invalid LAN port");
+    }
+    if fields.get("lan_fp").and_then(|v| hex::decode(v).ok()).filter(|p| p.len() == 32).is_none() {
+        return Some("missing or invalid LAN certificate fingerprint");
+    }
+    if parse_candidates(fields).is_empty() { return Some("no usable advertised IPv4 address"); }
+    None
+}
+
+fn remaining(deadline: Instant) -> Result<Duration> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() { bail!("LAN deadline exceeded"); }
+    Ok(left)
+}
+
 fn connect(candidate: &Candidate) -> Result<native_tls::TlsStream<TcpStream>> {
-    let tcp = TcpStream::connect_timeout(&candidate.addr, Duration::from_millis(400))?;
-    tcp.set_nodelay(true)?;
-    tcp.set_read_timeout(Some(Duration::from_millis(800)))?;
-    tcp.set_write_timeout(Some(Duration::from_millis(800)))?;
-    // No CA/hostname trust: identity comes exclusively from the authenticated
-    // BLE fingerprint. Never send AUTH or any application bytes before pinning.
-    let tls = native_tls::TlsConnector::builder()
-        .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
-        .danger_accept_invalid_certs(true).danger_accept_invalid_hostnames(true).use_sni(false).build()?
-        .connect("bridge-lan", tcp).map_err(|e| anyhow!("LAN TLS: {e}"))?;
-    let cert = tls.peer_certificate()?.context("LAN peer has no certificate")?.to_der()?;
-    if Sha256::digest(&cert).as_slice() != candidate.pin.as_slice() { bail!("LAN certificate pin mismatch"); }
+    let mut tls = connect_until(candidate, Instant::now() + LAN_PROBE)?;
+    tls.get_mut().set_nonblocking(false)?;
+    tls.get_ref().set_read_timeout(Some(LAN_PROBE))?;
+    tls.get_ref().set_write_timeout(Some(LAN_PROBE))?;
     Ok(tls)
 }
 
-fn select(secret: &str, stop: &AtomicBool) -> Option<Candidate> {
-    // Give a requested fresh BLE status a short chance to arrive, while still
-    // using a recent advertisement immediately. No serial per-address waits.
-    let until = Instant::now() + Duration::from_millis(300);
-    let candidates = loop {
-        if stop.load(Ordering::Relaxed) { return None; }
-        if let Some(a) = discovery().lock().unwrap().as_ref() {
-            if a.secret == secret && a.seen.elapsed() < Duration::from_secs(90) && !a.candidates.is_empty() { break a.candidates.clone(); }
+/// Nonblocking TLS ensures a slow/dribbling handshake cannot outlive the shared
+/// candidate deadline. TCP, TLS and STATUS all consume the same 2400 ms budget.
+fn connect_until(candidate: &Candidate, deadline: Instant) -> Result<native_tls::TlsStream<TcpStream>> {
+    let tcp = TcpStream::connect_timeout(&candidate.addr, TCP_CONNECT.min(remaining(deadline)?))
+        .context("TCP connect failed (800 ms cap)")?;
+    tcp.set_nodelay(true)?;
+    tcp.set_nonblocking(true)?;
+    // No CA/hostname trust: identity comes exclusively from authenticated BLE.
+    // Never send AUTH or application bytes before certificate pin validation.
+    let connector = native_tls::TlsConnector::builder()
+        .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
+        .danger_accept_invalid_certs(true).danger_accept_invalid_hostnames(true).use_sni(false).build()?;
+    let mut handshake = connector.connect("bridge-lan", tcp);
+    let tls = loop {
+        remaining(deadline).context("TLS handshake timeout")?;
+        match handshake {
+            Ok(tls) => break tls,
+            Err(native_tls::HandshakeError::Failure(e)) => return Err(anyhow!("TLS handshake failed: {e}")),
+            Err(native_tls::HandshakeError::WouldBlock(mid)) => {
+                std::thread::sleep(Duration::from_millis(5));
+                handshake = mid.handshake();
+            }
         }
-        if Instant::now() >= until { return None; }
-        std::thread::sleep(Duration::from_millis(15));
     };
+    let cert = tls.peer_certificate()?.context("TLS peer has no certificate")?.to_der()?;
+    if Sha256::digest(&cert).as_slice() != candidate.pin.as_slice() { bail!("TLS certificate pin mismatch"); }
+    Ok(tls)
+}
+
+fn probe(candidate: &Candidate, secret: &str, deadline: Instant) -> Result<()> {
+    let mut tls = connect_until(candidate, deadline)?;
+    let request = format!("AUTH {secret}\nSTATUS\n");
+    let mut sent = 0;
+    while sent < request.len() {
+        remaining(deadline).context("AUTH/STATUS write timeout")?;
+        match tls.write(&request.as_bytes()[sent..]) {
+            Ok(0) => bail!("connection closed while writing AUTH/STATUS"),
+            Ok(n) => sent += n,
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) =>
+                std::thread::sleep(Duration::from_millis(5)),
+            Err(e) => return Err(e).context("AUTH/STATUS write failed"),
+        }
+    }
+    let mut response = Vec::new();
+    let mut byte = [0];
+    while response.len() < 4096 {
+        remaining(deadline).context("AUTH/STATUS response timeout")?;
+        match tls.read(&mut byte) {
+            Ok(0) => bail!("connection closed before AUTH/STATUS response"),
+            Ok(_) if byte[0] == b'\n' => {
+                // Never log the peer's raw response or the AUTH request.
+                if !response.starts_with(b"OK ") { bail!("AUTH/STATUS rejected or invalid response"); }
+                return Ok(());
+            }
+            Ok(_) => response.push(byte[0]),
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) =>
+                std::thread::sleep(Duration::from_millis(5)),
+            Err(e) => return Err(e).context("AUTH/STATUS read failed"),
+        }
+    }
+    bail!("AUTH/STATUS response exceeds 4096 bytes")
+}
+
+fn select(secret: &str, stop: &AtomicBool) -> std::result::Result<Candidate, String> {
+    let started = Instant::now();
+    // Existing fresh advertisements take the fast path; otherwise give the
+    // requested BLE status up to one second. Do not wait a full second needlessly.
+    let until = started + BLE_WAIT;
+    let candidates = loop {
+        if stop.load(Ordering::Relaxed) { return Err("selection cancelled".into()); }
+        {
+            let cached = discovery().lock().unwrap();
+            if let Some(a) = cached.as_ref() {
+                if a.secret == secret && a.seen.elapsed() < Duration::from_secs(90) && !a.candidates.is_empty() {
+                    break a.candidates.clone();
+                }
+            }
+            if Instant::now() >= until {
+                let reason = match cached.as_ref() {
+                    None => "no authenticated BLE status received",
+                    Some(a) if a.secret != secret => "cached BLE advertisement belongs to different pairing",
+                    Some(a) if a.seen.elapsed() >= Duration::from_secs(90) => "BLE LAN advertisement expired (older than 90 s)",
+                    Some(a) => a.issue.unwrap_or("BLE status contains no LAN candidates"),
+                };
+                return Err(format!("BLE address wait timed out after 1000 ms: {reason}"));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let count = candidates.len();
+    crate::log!("transport", "LAN: {} candidate(s), BLE wait {} ms; parallel probe budget 2400 ms, TCP cap 800 ms", count, started.elapsed().as_millis());
+    let until = Instant::now() + LAN_PROBE;
     let (tx, rx) = std::sync::mpsc::channel();
     for candidate in candidates {
         let tx = tx.clone();
         let secret = secret.to_string();
         std::thread::spawn(move || {
-            let probe = (|| -> Result<()> {
-                let mut tls = connect(&candidate)?;
-                tls.write_all(format!("AUTH {secret}\nSTATUS\n").as_bytes())?;
-                let mut response = Vec::new();
-                let mut byte = [0];
-                while response.len() < 4096 {
-                    tls.read_exact(&mut byte)?;
-                    if byte[0] == b'\n' { break; }
-                    response.push(byte[0]);
-                }
-                if !response.starts_with(b"OK ") { bail!("LAN probe rejected"); }
-                Ok(())
-            })();
-            if probe.is_ok() { let _ = tx.send(candidate); }
+            let result = probe(&candidate, &secret, until).map_err(|e| format!("{e:#}"));
+            let _ = tx.send((candidate, result));
         });
     }
     drop(tx);
-    let until = Instant::now() + Duration::from_millis(1600);
+    let mut failed = 0;
+    let mut first_failure = None;
     while Instant::now() < until && !stop.load(Ordering::Relaxed) {
-        match rx.recv_timeout(Duration::from_millis(25)) {
-            Ok(c) => return Some(c),
+        let wait = Duration::from_millis(25).min(until.saturating_duration_since(Instant::now()));
+        match rx.recv_timeout(wait) {
+            Ok((candidate, Ok(()))) => {
+                crate::log!("transport", "LAN probe succeeded: {} (selection {} ms)", candidate.addr, started.elapsed().as_millis());
+                return Ok(candidate);
+            }
+            Ok((candidate, Err(reason))) => {
+                failed += 1;
+                crate::log!("transport", "LAN probe failed: {}: {}", candidate.addr, reason);
+                if first_failure.is_none() { first_failure = Some(format!("{}: {reason}", candidate.addr)); }
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             Err(_) => {}
         }
     }
-    None
+    if stop.load(Ordering::Relaxed) { return Err("selection cancelled".into()); }
+    let summary = if failed == count { "all candidates failed" } else { "2400 ms parallel probe deadline reached" };
+    Err(format!("{summary}; {failed}/{count} failures reported, {} pending; first failure: {}", count - failed, first_failure.as_deref().unwrap_or("none (probes did not complete before deadline)")))
 }
 
 fn advertised(secret: &str) -> bool {
@@ -119,9 +216,21 @@ fn image_reply(stream: &mut impl Read, sequence: u32) -> Result<String> {
 /// still-unused grant can be consumed by BLE begin instead.
 pub fn send_image(secret: &str, sequence: u32, png: &[u8], grant: &str) -> Result<bool> {
     if !advertised(secret) { return Ok(false); }
-    let Some(candidate) = select(secret, &AtomicBool::new(false)) else { return Ok(false) };
+    let candidate = match select(secret, &AtomicBool::new(false)) {
+        Ok(candidate) => candidate,
+        Err(reason) => {
+            crate::log!("clipboard", "LAN selection failed; falling back to BLE: {reason}");
+            return Ok(false);
+        }
+    };
     if crate::clipboard::sequence() != sequence { bail!("clipboard changed"); }
-    let mut tls = match connect(&candidate) { Ok(tls) => tls, Err(_) => return Ok(false) };
+    let mut tls = match connect(&candidate) {
+        Ok(tls) => tls,
+        Err(e) => {
+            crate::log!("clipboard", "LAN reconnect failed for {}; falling back to BLE: {e:#}", candidate.addr);
+            return Ok(false);
+        }
+    };
     tls.get_ref().set_read_timeout(Some(Duration::from_millis(200)))?;
     tls.get_ref().set_write_timeout(Some(Duration::from_secs(1)))?;
     tls.write_all(format!("AUTH {secret}\nIMGB {} {grant}\n", png.len()).as_bytes())?;
@@ -172,19 +281,23 @@ fn serve(listener: TcpListener, ticket: &str, secret: &str, stop: Arc<AtomicBool
     let lan = select(secret, &stop);
     if stop.load(Ordering::Relaxed) { return Ok(()); }
     let mut fallback = None;
-    let route = if let Some(candidate) = lan {
-        state.store(1, Ordering::Release);
-        crate::log!("transport", "using LAN (TLS, BLE certificate pin)");
-        Route::Lan(candidate)
-    } else {
-        // Keep the public loopback adapter stable; dumbpipe gets a private port.
-        let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-        let port = reservation.local_addr()?.port();
-        drop(reservation);
-        fallback = Some(crate::tunnel::Tunnel::start_at(ticket, port)?);
-        state.store(2, Ordering::Release);
-        crate::log!("transport", "LAN unavailable; using iroh");
-        Route::Iroh(port)
+    let route = match lan {
+        Ok(candidate) => {
+            state.store(1, Ordering::Release);
+            crate::log!("transport", "using LAN (TLS, BLE certificate pin)");
+            Route::Lan(candidate)
+        }
+        Err(reason) => {
+            crate::log!("transport", "LAN unavailable; selecting iroh because: {reason}");
+            // Keep the public loopback adapter stable; dumbpipe gets a private port.
+            let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+            let port = reservation.local_addr()?.port();
+            drop(reservation);
+            fallback = Some(crate::tunnel::Tunnel::start_at(ticket, port)?);
+            state.store(2, Ordering::Release);
+            crate::log!("transport", "using iroh; LAN fallback reason: {reason}");
+            Route::Iroh(port)
+        }
     };
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     while !stop.load(Ordering::Relaxed) {
@@ -324,6 +437,22 @@ mod tests {
     }
 
     #[test]
+    fn selection_budgets_and_advertisement_diagnostics() {
+        assert_eq!(BLE_WAIT.as_millis(), 1000);
+        assert_eq!(LAN_PROBE.as_millis(), 2400);
+        assert_eq!(TCP_CONNECT.as_millis(), 800);
+        assert!(remaining(Instant::now() - Duration::from_millis(1)).is_err());
+        let mut fields = HashMap::new();
+        assert_eq!(advertisement_issue(&fields), Some("BLE status contains no LAN endpoint (listener not ready or phone build lacks LAN)"));
+        fields.insert("lan_port".into(), "0".into());
+        assert_eq!(advertisement_issue(&fields), Some("missing or invalid LAN port"));
+        fields.insert("lan_port".into(), "12345".into());
+        fields.insert("lan_fp".into(), "ab".repeat(32));
+        fields.insert("lan_ips".into(), "::1,127.0.0.1".into());
+        assert_eq!(advertisement_issue(&fields), Some("no usable advertised IPv4 address"));
+    }
+
+    #[test]
     fn discovery_requires_pin_port_and_ipv4() {
         let mut fields = HashMap::from([
             ("lan_port".into(), "12345".into()),
@@ -333,7 +462,9 @@ mod tests {
         let candidates = parse_candidates(&fields);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].addr.to_string(), "192.168.1.5:12345");
+        assert_eq!(advertisement_issue(&fields), None);
         fields.insert("lan_fp".into(), "bad".into());
         assert!(parse_candidates(&fields).is_empty());
+        assert_eq!(advertisement_issue(&fields), Some("missing or invalid LAN certificate fingerprint"));
     }
 }
