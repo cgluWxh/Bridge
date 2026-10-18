@@ -148,6 +148,7 @@ class BleLink(
         var pendingNonce: String? = null
         var crypto: Pairing.SessionCrypto? = null
         var imageId: String? = null
+        var imageGrant: String? = null
         var imageSize = 0
         var imageBytes: java.io.ByteArrayOutputStream? = null
         var imageTouched = 0L
@@ -924,6 +925,8 @@ class BleLink(
         if (!id.matches(Regex("[0-9]{1,10}"))) return
 
         fun clear() {
+            peer.imageGrant?.let { ImageClipboard.revokeGrant(it) }
+            peer.imageGrant = null
             peer.imageId = null
             peer.imageBytes = null
             peer.imageSize = 0
@@ -931,17 +934,24 @@ class BleLink(
 
         fun reply(status: String) = sendTo(peer, TYPE_CLIPBOARD_IMAGE, "$id $status")
         try {
-            if (op == "begin") {
-                clear()
+            if (op == "admit" || op == "begin") {
                 val size = words.getOrNull(2)?.toIntOrNull() ?: 0
+                val token = words.getOrNull(3)
+                val admitted = op == "begin" && token != null && ImageClipboard.consumeGrant(token, size.toLong())
+                clear()
                 val awake = context.getSystemService(android.os.PowerManager::class.java).isInteractive
-                if (!awake || size !in 1..1048576) {
-                    reply(if (!awake) "NACK SCREEN_OFF" else "NACK SIZE")
+                val limit = if (op == "admit") 32 * 1024 * 1024 else 1048576
+                if ((!admitted && !awake) || size !in 1..limit || (op == "begin" && token != null && !admitted)) {
+                    reply(if (!admitted && !awake) "NACK SCREEN_OFF" else "NACK SIZE_OR_GRANT")
                     return
+                }
+                if (op == "admit") {
+                    if (token == null || !ImageClipboard.grant(token, size.toLong())) { reply("NACK GRANT"); return }
+                    peer.imageGrant = token
                 }
                 peer.imageId = id
                 peer.imageSize = size
-                peer.imageBytes = java.io.ByteArrayOutputStream()
+                peer.imageBytes = if (op == "begin") java.io.ByteArrayOutputStream() else null
                 peer.imageTouched = android.os.SystemClock.elapsedRealtime()
 
                 fun expire() {
@@ -1219,6 +1229,8 @@ class BleLink(
             return
         }
         if (type == TYPE_CLIPBOARD) {
+            peer.imageGrant?.let { ImageClipboard.revokeGrant(it) }
+            peer.imageGrant = null
             peer.imageId = null
             peer.imageBytes = null
             // A normal app may write the clipboard in the background (reading it

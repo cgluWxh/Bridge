@@ -98,8 +98,8 @@ class ControlProxy(
                     ImageClipboard.receive(ctx, it, readLine(input, 80).orEmpty())
                 }
 
-                // Background image clipboard: same payload, but screen-on admission
-                // instead of requiring a mirroring session. READY is the ACK.
+                // IMGB <size> <one-use BLE grant>: screen admission happened
+                // over BLE before any LAN probing. READY confirms grant consumption.
                 "IMGB" -> {
                     ImageClipboard.receive(ctx, it, readLine(input, 80).orEmpty(), requireMirror = false)
                 }

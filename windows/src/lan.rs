@@ -115,15 +115,16 @@ fn image_reply(stream: &mut impl Read, sequence: u32) -> Result<String> {
 }
 
 /// Independent clipboard streams need no daemon/mirror or running local tunnel.
-/// False means LAN was unavailable before admission, so BLE can take over.
-pub fn send_image(secret: &str, sequence: u32, png: &[u8]) -> Result<bool> {
+/// Call only AFTER BLE admission. False means LAN is unreachable, so the
+/// still-unused grant can be consumed by BLE begin instead.
+pub fn send_image(secret: &str, sequence: u32, png: &[u8], grant: &str) -> Result<bool> {
     if !advertised(secret) { return Ok(false); }
     let Some(candidate) = select(secret, &AtomicBool::new(false)) else { return Ok(false) };
     if crate::clipboard::sequence() != sequence { bail!("clipboard changed"); }
     let mut tls = match connect(&candidate) { Ok(tls) => tls, Err(_) => return Ok(false) };
     tls.get_ref().set_read_timeout(Some(Duration::from_millis(200)))?;
     tls.get_ref().set_write_timeout(Some(Duration::from_secs(1)))?;
-    tls.write_all(format!("AUTH {secret}\nIMGB {}\n", png.len()).as_bytes())?;
+    tls.write_all(format!("AUTH {secret}\nIMGB {} {grant}\n", png.len()).as_bytes())?;
     let ready = image_reply(&mut tls, sequence)?;
     if ready != "READY" { bail!("phone refused LAN image: {ready}"); }
     for block in png.chunks(16 * 1024) {

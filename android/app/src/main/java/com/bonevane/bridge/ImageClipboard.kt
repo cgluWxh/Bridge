@@ -23,6 +23,25 @@ object ImageClipboard {
 
     fun directory(context: Context) = File(context.cacheDir, "clipboard-images").also { it.mkdirs() }
 
+    private data class Grant(val size: Long, val expires: Long)
+    private val grants = java.util.concurrent.ConcurrentHashMap<String, Grant>()
+
+    /** Issued only by the verified BLE screen-on admission, before LAN probing. */
+    fun grant(token: String, size: Long): Boolean {
+        val now = android.os.SystemClock.elapsedRealtime()
+        grants.entries.removeIf { it.value.expires <= now }
+        if (!token.matches(Regex("[a-f0-9]{32}")) || size !in 1..MAX_BYTES || grants.size >= 64) return false
+        return grants.putIfAbsent(token, Grant(size, now + 60_000)) == null
+    }
+
+    fun revokeGrant(token: String) { grants.remove(token) }
+
+    /** Single use for either LAN admission or BLE begin; no screen recheck. */
+    fun consumeGrant(token: String, size: Long): Boolean {
+        val grant = grants.remove(token) ?: return false
+        return grant.size == size && grant.expires > android.os.SystemClock.elapsedRealtime()
+    }
+
     /** IMGC <PNG byte length> -> READY -> PNG -> OK. Runs after pairing AUTH. */
     @Synchronized
     fun receive(
@@ -40,13 +59,13 @@ object ImageClipboard {
         }
         var file: File? = null
         try {
-            if (requireMirror) {
-                check(TunnelState.mirroring) { "Mirroring is not active" }
-            } else {
-                check(context.getSystemService(android.os.PowerManager::class.java).isInteractive) { "SCREEN_OFF" }
-            }
-            val size = header.trim().toLongOrNull() ?: error("Invalid image length")
+            if (requireMirror) check(TunnelState.mirroring) { "Mirroring is not active" }
+            val fields = header.trim().split(' ', limit = 2)
+            val size = fields[0].toLongOrNull() ?: error("Invalid image length")
             require(size in 1..MAX_BYTES) { "Image exceeds size limit" }
+            if (!requireMirror) {
+                check(fields.size == 2 && consumeGrant(fields[1], size)) { "Missing or expired BLE image admission" }
+            }
             val dir = directory(context)
             // Retain previous images for 24 h: a chat app may read its URI later.
             dir

@@ -455,14 +455,18 @@ fn image_wait(link: &Arc<Mutex<Link>>, seq: u32, expected: &str) -> Result<()> {
 
 fn transfer_image(link: &Arc<Mutex<Link>>, seq: u32, secret: &str) -> Result<()> {
     let png = crate::clipboard::sync_png(seq)?;
-    if crate::lan::send_image(secret, seq, &png)? { return Ok(()); }
-    if png.len() > 1024 * 1024 {
-        crate::notify::show("Bridge", "Image not synchronized", "LAN unavailable. This image exceeds the 1 MiB BLE limit.");
-        bail!("LAN unavailable; image exceeds BLE's 1 MiB limit");
-    }
+    let grant = protocol::nonce();
     link.lock().unwrap().image_reply = None;
     let result = (|| -> Result<()> {
-        image_message(link, &format!("begin {seq} {}", png.len()))?;
+        // Admission MUST precede every LAN probe/connect caused by this image.
+        image_message(link, &format!("admit {seq} {} {grant}", png.len()))?;
+        image_wait(link, seq, &format!("{seq} ACK"))?;
+        if crate::lan::send_image(secret, seq, &png, &grant)? { return Ok(()); }
+        if png.len() > 1024 * 1024 {
+            crate::notify::show("Bridge", "Image not synchronized", "LAN unavailable. This image exceeds the 1 MiB BLE limit.");
+            bail!("LAN unavailable; image exceeds BLE's 1 MiB limit");
+        }
+        image_message(link, &format!("begin {seq} {} {grant}", png.len()))?;
         image_wait(link, seq, &format!("{seq} ACK"))?;
         for (offset, block) in png.chunks(384).enumerate() {
             if crate::clipboard::sequence() != seq { bail!("clipboard changed"); }
@@ -477,7 +481,8 @@ fn transfer_image(link: &Arc<Mutex<Link>>, seq: u32, secret: &str) -> Result<()>
         crate::log!("clipboard", "image synchronized over BLE ({} bytes)", png.len());
         Ok(())
     })();
-    if result.is_err() { let _ = image_message(link, &format!("abort {seq}")); }
+    // Release any unused admission, including after a successful LAN upload.
+    let _ = image_message(link, &format!("abort {seq}"));
     result
 }
 

@@ -10,13 +10,13 @@ The regular loopback Stream API remains unchanged, including cloned read handles
 
 Text clipboard behavior during mirroring is preserved from git: Windows sends text over the scrcpy control stream and applies incoming scrcpy clipboard messages. This follows the session's LAN/iroh route. Outside mirroring, text synchronization uses BLE and has no screen-state admission check; it never opens a separate LAN text connection.
 
-Outside mirroring, Windows-to-phone images prefer independently opened pinned LAN streams when a recent BLE advertisement is available; they do not require the daemon or a files window. If LAN is unavailable before admission, images may fall back to BLE.
+Outside mirroring, every Windows-to-phone image first sends `admit <sequence> <PNG size> <random grant>` over verified BLE. The phone returns ACK only while its screen is interactive; NACK or timeout ends the attempt **before any LAN probing or connection**. After ACK, Windows prefers independently opened pinned LAN streams, falling back to BLE when LAN cannot be reached. No daemon or files window is required.
 
-Images use `IMGB <PNG byte length>` -> `READY` -> PNG -> `OK`. LAN and mirroring accept PNGs up to **32 MiB / 40 megapixels**. Only the BLE fallback is limited to **1 MiB**. If LAN is unavailable for an image larger than 1 MiB, a toast explains that the image cannot be synchronized over BLE.
+LAN images use `IMGB <PNG byte length> <grant>` -> `READY` -> PNG -> `OK`. LAN consumes the unguessable, size-bound, single-use BLE grant (expires after 60 seconds). BLE fallback consumes the same unused grant through `begin <sequence> <size> <grant>` before sending blocks. LAN and mirroring accept PNGs up to **32 MiB / 40 megapixels**. Only the BLE fallback is limited to **1 MiB**. If LAN is unavailable for an image larger than 1 MiB, a toast explains that the image cannot be synchronized over BLE.
 
-Background images require the phone screen to be interactive at admission; a dark screen returns an error before any image bytes are sent. Turning the screen off after READY does not cancel. Windows clipboard sequence changes cancel both LAN and BLE image uploads, including copying text over an image. LAN cancellation closes the stream; incomplete files are deleted and never published. ACK waits poll cancellation every 200 ms; individual LAN writes have a 1 s timeout. As with any cross-device clipboard, changes racing with final publication cannot be made atomic; the following update supersedes the previous image.
+The screen check is performed at BLE admission, not by opening a LAN connection. A dark screen causes only BLE request/NACK traffic from this image attempt; no network discovery, TLS connection or image bytes are sent. Turning the screen off after the BLE ACK does not cancel or reject the admitted transfer, even if LAN has not connected yet. Windows clipboard sequence changes cancel both LAN and BLE image uploads, including copying text over an image. LAN cancellation closes the stream; incomplete files are deleted and never published. ACK waits poll cancellation every 200 ms; individual LAN writes have a 1 s timeout. As with any cross-device clipboard, changes racing with final publication cannot be made atomic; the following update supersedes the previous image.
 
-LAN admission/publication errors are not automatically retried over BLE after admission, avoiding duplicate or stale publication. No background image auto-retry occurs merely because the screen wakes. Copy again to retry. Existing mirror Ctrl+V still uses IMGC and its paste-key behavior.
+LAN grant/publication errors are not automatically retried over BLE after the LAN request, avoiding duplicate or stale publication. Grants are revoked on cancellation/text replacement and unused grants are released after LAN success; they cannot be replayed. Updated background-image clients require the new BLE admission support; lack of an ACK never falls through to LAN. No background image auto-retry occurs merely because the screen wakes. Copy again to retry. Existing mirror Ctrl+V still uses IMGC and its paste-key behavior.
 
 ## Security and compatibility
 
@@ -37,7 +37,9 @@ TLS is mandatory. Windows verifies the exact BLE-advertised certificate fingerpr
 - Older Windows client with updated phone: automatic iroh wake remains available.
 - Background LAN image over 1 MiB but at most 32 MiB: accepted. Same image with no LAN: rejected rather than sent over BLE. BLE images at most 1 MiB still work.
 - PNG above 32 MiB or above 40 MP: rejected for LAN and mirror as well.
-- Screen off before begin: no image bytes sent. Screen off during upload: transfer can complete.
+- Screen off before clipboard copy: packet capture must show no image-triggered LAN probe/TCP/TLS connection, only BLE admit/NACK. Test both small and >1 MiB images with a reachable cached LAN address.
+- Turn screen off immediately after BLE ACK, before LAN connect or BLE begin: the granted transfer must still succeed. Missing, expired, reused or wrong-size grants must be rejected before PNG bytes.
+- Cancel while waiting for BLE ACK: no LAN connection; grant revoked. Screen off during upload: transfer can complete.
 - Copy new text or another image during upload or admission wait: old upload cancels and latest clipboard wins. Include re-copying text that was copied before the image.
 - Older phone/client: original iroh path remains usable.
 
