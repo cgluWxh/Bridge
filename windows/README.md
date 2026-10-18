@@ -89,3 +89,24 @@ changing the Android input target. Errors show a toast and never paste stale
 content. Limits: 40 megapixels, 32 MB encoded PNG, 256 MB phone image cache; images
 are retained for delayed app reads and cleaned after 24 hours on a later upload.
 The URI provider is read-only and non-exported, with Android clipboard URI grants.
+
+## LAN connection timeouts
+
+**Settings → Phone → LAN connection timeouts** controls new connections:
+
+- BLE address wait: **1.5 s** by default (skipped when a fresh endpoint is cached).
+- TCP connect limit: **2 s** per candidate, capped by the remaining probe budget.
+- Parallel LAN probe budget: **5 s**, shared by TCP, TLS and AUTH/STATUS.
+
+Thus initial LAN selection can take up to about **6.5 s** before iroh fallback,
+not including iroh startup. A successful probe returns immediately. All candidates
+are probed in parallel, so the budget is not multiplied by the number of IPs.
+The settings are persisted in `settings.json`; old configurations use the new
+defaults. Active streams are not interrupted. Changing settings does not move an
+existing iroh tunnel to LAN: reconnect to try LAN again.
+
+The log records configured/effective budgets and candidate failures, plus the
+reason for iroh fallback. A TCP timeout happens before TLS and may indicate Wi-Fi
+wake-up, packet loss, isolation, or an unreachable endpoint; increasing a timeout
+cannot fix a permanently blocked route. The phone's own TLS authentication timeout
+is unchanged.

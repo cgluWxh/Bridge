@@ -12,9 +12,22 @@ use std::time::{Duration, Instant};
 #[derive(Clone)]
 struct Candidate { addr: SocketAddr, pin: Vec<u8> }
 struct Advertisement { secret: String, seen: Instant, candidates: Vec<Candidate>, issue: Option<&'static str> }
-const BLE_WAIT: Duration = Duration::from_secs(1);
-const LAN_PROBE: Duration = Duration::from_millis(2400);
-const TCP_CONNECT: Duration = Duration::from_millis(800);
+#[derive(Clone, Copy)]
+struct Timeouts { ble_wait: Duration, tcp_connect: Duration, probe: Duration }
+impl Timeouts {
+    fn from_settings(settings: &crate::settings::Settings) -> Self {
+        let mut settings = settings.clone();
+        settings.normalize_lan_timeouts();
+        Self {
+            ble_wait: Duration::from_millis(settings.lan_ble_wait_ms as u64),
+            tcp_connect: Duration::from_millis(settings.lan_tcp_connect_ms as u64),
+            probe: Duration::from_millis(settings.lan_probe_ms as u64),
+        }
+    }
+    // Read once per selection, not per byte/probe iteration. Saved UI changes
+    // apply to the next connection without mutating an in-flight deadline.
+    fn load() -> Self { Self::from_settings(&crate::settings::Settings::load()) }
+}
 static DISCOVERY: OnceLock<Mutex<Option<Advertisement>>> = OnceLock::new();
 fn discovery() -> &'static Mutex<Option<Advertisement>> { DISCOVERY.get_or_init(|| Mutex::new(None)) }
 
@@ -56,18 +69,20 @@ fn remaining(deadline: Instant) -> Result<Duration> {
 }
 
 fn connect(candidate: &Candidate) -> Result<native_tls::TlsStream<TcpStream>> {
-    let mut tls = connect_until(candidate, Instant::now() + LAN_PROBE)?;
+    let timeouts = Timeouts::load();
+    let mut tls = connect_until(candidate, Instant::now() + timeouts.probe, timeouts.tcp_connect)?;
     tls.get_mut().set_nonblocking(false)?;
-    tls.get_ref().set_read_timeout(Some(LAN_PROBE))?;
-    tls.get_ref().set_write_timeout(Some(LAN_PROBE))?;
+    tls.get_ref().set_read_timeout(Some(timeouts.probe))?;
+    tls.get_ref().set_write_timeout(Some(timeouts.probe))?;
     Ok(tls)
 }
 
 /// Nonblocking TLS ensures a slow/dribbling handshake cannot outlive the shared
-/// candidate deadline. TCP, TLS and STATUS all consume the same 2400 ms budget.
-fn connect_until(candidate: &Candidate, deadline: Instant) -> Result<native_tls::TlsStream<TcpStream>> {
-    let tcp = TcpStream::connect_timeout(&candidate.addr, TCP_CONNECT.min(remaining(deadline)?))
-        .context("TCP connect failed (800 ms cap)")?;
+/// candidate deadline. TCP, TLS and STATUS share the configured probe budget.
+fn connect_until(candidate: &Candidate, deadline: Instant, tcp_cap: Duration) -> Result<native_tls::TlsStream<TcpStream>> {
+    let timeout = tcp_cap.min(remaining(deadline)?);
+    let tcp = TcpStream::connect_timeout(&candidate.addr, timeout)
+        .with_context(|| format!("TCP connect failed ({} ms effective cap)", timeout.as_millis()))?;
     tcp.set_nodelay(true)?;
     tcp.set_nonblocking(true)?;
     // No CA/hostname trust: identity comes exclusively from authenticated BLE.
@@ -92,8 +107,8 @@ fn connect_until(candidate: &Candidate, deadline: Instant) -> Result<native_tls:
     Ok(tls)
 }
 
-fn probe(candidate: &Candidate, secret: &str, deadline: Instant) -> Result<()> {
-    let mut tls = connect_until(candidate, deadline)?;
+fn probe(candidate: &Candidate, secret: &str, deadline: Instant, tcp_cap: Duration) -> Result<()> {
+    let mut tls = connect_until(candidate, deadline, tcp_cap)?;
     let request = format!("AUTH {secret}\nSTATUS\n");
     let mut sent = 0;
     while sent < request.len() {
@@ -127,10 +142,11 @@ fn probe(candidate: &Candidate, secret: &str, deadline: Instant) -> Result<()> {
 }
 
 fn select(secret: &str, stop: &AtomicBool) -> std::result::Result<Candidate, String> {
+    let timeouts = Timeouts::load();
     let started = Instant::now();
-    // Existing fresh advertisements take the fast path; otherwise give the
-    // requested BLE status up to one second. Do not wait a full second needlessly.
-    let until = started + BLE_WAIT;
+    crate::log!("transport", "LAN selection budgets: BLE {} ms, TCP {} ms, parallel probe {} ms", timeouts.ble_wait.as_millis(), timeouts.tcp_connect.as_millis(), timeouts.probe.as_millis());
+    // Existing fresh advertisements take the fast path; no mandatory wait.
+    let until = started + timeouts.ble_wait;
     let candidates = loop {
         if stop.load(Ordering::Relaxed) { return Err("selection cancelled".into()); }
         {
@@ -147,20 +163,20 @@ fn select(secret: &str, stop: &AtomicBool) -> std::result::Result<Candidate, Str
                     Some(a) if a.seen.elapsed() >= Duration::from_secs(90) => "BLE LAN advertisement expired (older than 90 s)",
                     Some(a) => a.issue.unwrap_or("BLE status contains no LAN candidates"),
                 };
-                return Err(format!("BLE address wait timed out after 1000 ms: {reason}"));
+                return Err(format!("BLE address wait timed out after {} ms: {reason}", timeouts.ble_wait.as_millis()));
             }
         }
         std::thread::sleep(Duration::from_millis(10));
     };
     let count = candidates.len();
-    crate::log!("transport", "LAN: {} candidate(s), BLE wait {} ms; parallel probe budget 2400 ms, TCP cap 800 ms", count, started.elapsed().as_millis());
-    let until = Instant::now() + LAN_PROBE;
+    crate::log!("transport", "LAN: {} candidate(s), BLE wait {} ms; parallel probe budget {} ms, TCP cap {} ms", count, started.elapsed().as_millis(), timeouts.probe.as_millis(), timeouts.tcp_connect.as_millis());
+    let until = Instant::now() + timeouts.probe;
     let (tx, rx) = std::sync::mpsc::channel();
     for candidate in candidates {
         let tx = tx.clone();
         let secret = secret.to_string();
         std::thread::spawn(move || {
-            let result = probe(&candidate, &secret, until).map_err(|e| format!("{e:#}"));
+            let result = probe(&candidate, &secret, until, timeouts.tcp_connect).map_err(|e| format!("{e:#}"));
             let _ = tx.send((candidate, result));
         });
     }
@@ -184,7 +200,8 @@ fn select(secret: &str, stop: &AtomicBool) -> std::result::Result<Candidate, Str
         }
     }
     if stop.load(Ordering::Relaxed) { return Err("selection cancelled".into()); }
-    let summary = if failed == count { "all candidates failed" } else { "2400 ms parallel probe deadline reached" };
+    let summary = if failed == count { "all candidates failed".to_string() }
+        else { format!("{} ms parallel probe deadline reached", timeouts.probe.as_millis()) };
     Err(format!("{summary}; {failed}/{count} failures reported, {} pending; first failure: {}", count - failed, first_failure.as_deref().unwrap_or("none (probes did not complete before deadline)")))
 }
 
@@ -438,9 +455,25 @@ mod tests {
 
     #[test]
     fn selection_budgets_and_advertisement_diagnostics() {
-        assert_eq!(BLE_WAIT.as_millis(), 1000);
-        assert_eq!(LAN_PROBE.as_millis(), 2400);
-        assert_eq!(TCP_CONNECT.as_millis(), 800);
+        let defaults = Timeouts::from_settings(&crate::settings::Settings::default());
+        assert_eq!(defaults.ble_wait.as_millis(), 1500);
+        assert_eq!(defaults.probe.as_millis(), 5000);
+        assert_eq!(defaults.tcp_connect.as_millis(), 2000);
+        let mut custom = crate::settings::Settings::default();
+        custom.lan_ble_wait_ms = 3000;
+        custom.lan_tcp_connect_ms = 5000;
+        custom.lan_probe_ms = 8000;
+        let configured = Timeouts::from_settings(&custom);
+        assert_eq!(configured.ble_wait.as_millis(), 3000);
+        assert_eq!(configured.tcp_connect.as_millis(), 5000);
+        assert_eq!(configured.probe.as_millis(), 8000);
+        custom.lan_ble_wait_ms = -1;
+        custom.lan_tcp_connect_ms = i32::MAX;
+        custom.lan_probe_ms = 500;
+        let bounded = Timeouts::from_settings(&custom);
+        assert_eq!(bounded.ble_wait.as_millis(), 100);
+        assert_eq!(bounded.tcp_connect.as_millis(), 500);
+        assert_eq!(bounded.probe.as_millis(), 500);
         assert!(remaining(Instant::now() - Duration::from_millis(1)).is_err());
         let mut fields = HashMap::new();
         assert_eq!(advertisement_issue(&fields), Some("BLE status contains no LAN endpoint (listener not ready or phone build lacks LAN)"));

@@ -22,6 +22,10 @@ pub struct Settings {
     pub mute_phone: bool,
     /// Clearing a notification on one side clears it on the other.
     pub sync_dismiss: bool,
+    pub lan_ble_wait_ms: i32,
+    pub lan_tcp_connect_ms: i32,
+    /// TCP + TLS + AUTH/STATUS share this parallel probe deadline.
+    pub lan_probe_ms: i32,
 }
 
 impl Default for Settings {
@@ -42,6 +46,9 @@ impl Default for Settings {
             turn_screen_off: false,
             mute_phone: false,
             sync_dismiss: true,
+            lan_ble_wait_ms: 1500,
+            lan_tcp_connect_ms: 2000,
+            lan_probe_ms: 5000,
         }
     }
 }
@@ -78,20 +85,30 @@ impl Settings {
                 "turn_screen_off" => s.turn_screen_off = b,
                 "mute_phone" => s.mute_phone = b,
                 "sync_dismiss" => s.sync_dismiss = b,
+                "lan_ble_wait_ms" => s.lan_ble_wait_ms = n.clamp(100, 10000) as i32,
+                "lan_tcp_connect_ms" => s.lan_tcp_connect_ms = n.clamp(200, 10000) as i32,
+                "lan_probe_ms" => s.lan_probe_ms = n.clamp(500, 30000) as i32,
                 _ => {}
             }
         }
+        s.normalize_lan_timeouts();
         s
+    }
+
+    pub fn normalize_lan_timeouts(&mut self) {
+        self.lan_ble_wait_ms = self.lan_ble_wait_ms.clamp(100, 10000);
+        self.lan_probe_ms = self.lan_probe_ms.clamp(500, 30000);
+        self.lan_tcp_connect_ms = self.lan_tcp_connect_ms.clamp(200, 10000).min(self.lan_probe_ms);
     }
 
     pub fn save(&self) {
         let _ = std::fs::create_dir_all(crate::store::data_dir());
         let text = format!(
-            "{{\n  \"launch_at_login\": {},\n  \"use_bluetooth\": {},\n  \"mirror_notifications\": {},\n  \"notifications_anywhere\": {},\n  \"sync_clipboard\": {},\n  \"background_clipboard\": {},\n  \"keep_ready\": {},\n  \"keep_ready_changed_at\": {},\n  \"max_size\": {},\n  \"bitrate_mbps\": {},\n  \"turn_screen_off\": {},\n  \"mute_phone\": {},\n  \"sync_dismiss\": {},\n  \"open_mirroring_on_notification\": {}\n}}\n",
+            "{{\n  \"launch_at_login\": {},\n  \"use_bluetooth\": {},\n  \"mirror_notifications\": {},\n  \"notifications_anywhere\": {},\n  \"sync_clipboard\": {},\n  \"background_clipboard\": {},\n  \"keep_ready\": {},\n  \"keep_ready_changed_at\": {},\n  \"max_size\": {},\n  \"bitrate_mbps\": {},\n  \"turn_screen_off\": {},\n  \"mute_phone\": {},\n  \"sync_dismiss\": {},\n  \"open_mirroring_on_notification\": {},\n  \"lan_ble_wait_ms\": {},\n  \"lan_tcp_connect_ms\": {},\n  \"lan_probe_ms\": {}\n}}\n",
             self.launch_at_login, self.use_bluetooth, self.mirror_notifications, self.notifications_anywhere,
             self.sync_clipboard, self.background_clipboard, self.keep_ready, self.keep_ready_changed_at,
             self.max_size, self.bitrate_mbps, self.turn_screen_off, self.mute_phone, self.sync_dismiss,
-            self.open_mirroring_on_notification
+            self.open_mirroring_on_notification, self.lan_ble_wait_ms, self.lan_tcp_connect_ms, self.lan_probe_ms
         );
         let _ = std::fs::write(path(), text);
         apply_launch_at_login(self.launch_at_login);

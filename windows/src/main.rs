@@ -325,6 +325,9 @@ impl App {
         st.set_turn_screen_off(self.settings.turn_screen_off);
         st.set_mute_phone(self.settings.mute_phone);
         st.set_sync_dismiss(self.settings.sync_dismiss);
+        st.set_lan_ble_wait_ms(self.settings.lan_ble_wait_ms);
+        st.set_lan_tcp_connect_ms(self.settings.lan_tcp_connect_ms);
+        st.set_lan_probe_ms(self.settings.lan_probe_ms);
         st.set_usb_busy(self.usb_busy);
         let t = &self.creds.ticket;
         st.set_ticket_short(if t.is_empty() { "Not paired".into() } else if t.len() > 28 { format!("{}…{}", &t[..14], &t[t.len() - 8..]).into() } else { t.clone().into() });
@@ -346,6 +349,10 @@ impl App {
         self.settings.turn_screen_off = st.get_turn_screen_off();
         self.settings.mute_phone = st.get_mute_phone();
         self.settings.sync_dismiss = st.get_sync_dismiss();
+        self.settings.lan_ble_wait_ms = st.get_lan_ble_wait_ms();
+        self.settings.lan_tcp_connect_ms = st.get_lan_tcp_connect_ms();
+        self.settings.lan_probe_ms = st.get_lan_probe_ms();
+        self.settings.normalize_lan_timeouts();
         let keep = st.get_keep_ready();
         if keep != self.settings.keep_ready {
             self.settings.keep_ready = keep;
@@ -356,6 +363,12 @@ impl App {
         }
         if self.settings != before {
             self.settings.save();
+            if self.settings.lan_ble_wait_ms != before.lan_ble_wait_ms ||
+                self.settings.lan_tcp_connect_ms != before.lan_tcp_connect_ms ||
+                self.settings.lan_probe_ms != before.lan_probe_ms {
+                self.log("transport", &format!("LAN settings saved for new connections: BLE {} ms, TCP {} ms, probe {} ms",
+                    self.settings.lan_ble_wait_ms, self.settings.lan_tcp_connect_ms, self.settings.lan_probe_ms));
+            }
             if before.use_bluetooth != self.settings.use_bluetooth {
                 if self.settings.use_bluetooth {
                     self.start_bluetooth();

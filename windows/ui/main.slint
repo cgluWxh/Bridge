@@ -93,6 +93,9 @@ export global SettingsState {
     in-out property <bool> turn-screen-off;
     in-out property <bool> mute-phone;
     in-out property <bool> sync-dismiss;
+    in-out property <int> lan-ble-wait-ms: 1500;
+    in-out property <int> lan-tcp-connect-ms: 2000;
+    in-out property <int> lan-probe-ms: 5000;
 
     in-out property <string> ticket-short: "Not paired";
     in-out property <string> pasted: "";
@@ -537,6 +540,28 @@ export component SettingsWindow inherits Window {
 
             if tabs.current == 1 : VerticalLayout {
                 spacing: 12px;
+                SectionTitle { text: "LAN connection timeouts"; }
+                Card {
+                    VerticalLayout {
+                        padding: 16px; spacing: 10px;
+                        Label { text: "BLE address wait: " + SettingsState.lan-ble-wait-ms + " ms"; }
+                        Choice { items: ["0.5 s", "1 s", "1.5 s", "3 s", "5 s"];
+                            current: SettingsState.lan-ble-wait-ms <= 500 ? 0 : SettingsState.lan-ble-wait-ms <= 1000 ? 1 : SettingsState.lan-ble-wait-ms <= 1500 ? 2 : SettingsState.lan-ble-wait-ms <= 3000 ? 3 : 4;
+                            changed => { SettingsState.lan-ble-wait-ms = self.current == 0 ? 500 : self.current == 1 ? 1000 : self.current == 2 ? 1500 : self.current == 3 ? 3000 : 5000; SettingsState.changed(); }
+                        }
+                        Label { text: "TCP connect limit: " + SettingsState.lan-tcp-connect-ms + " ms"; }
+                        Choice { items: ["0.8 s", "1.5 s", "2 s", "3 s", "5 s"];
+                            current: SettingsState.lan-tcp-connect-ms <= 800 ? 0 : SettingsState.lan-tcp-connect-ms <= 1500 ? 1 : SettingsState.lan-tcp-connect-ms <= 2000 ? 2 : SettingsState.lan-tcp-connect-ms <= 3000 ? 3 : 4;
+                            changed => { SettingsState.lan-tcp-connect-ms = self.current == 0 ? 800 : self.current == 1 ? 1500 : self.current == 2 ? 2000 : self.current == 3 ? 3000 : 5000; SettingsState.changed(); }
+                        }
+                        Label { text: "Parallel LAN probe budget: " + SettingsState.lan-probe-ms + " ms"; }
+                        Choice { items: ["2.4 s", "4 s", "5 s", "8 s", "12 s"];
+                            current: SettingsState.lan-probe-ms <= 2400 ? 0 : SettingsState.lan-probe-ms <= 4000 ? 1 : SettingsState.lan-probe-ms <= 5000 ? 2 : SettingsState.lan-probe-ms <= 8000 ? 3 : 4;
+                            changed => { SettingsState.lan-probe-ms = self.current == 0 ? 2400 : self.current == 1 ? 4000 : self.current == 2 ? 5000 : self.current == 3 ? 8000 : 12000; SettingsState.changed(); }
+                        }
+                        Muted { text: "Applies to new connections. TCP, TLS and authentication share the LAN probe budget; TCP is capped by the remaining time. Successful connections continue immediately. Longer limits delay iroh fallback when LAN is unavailable."; }
+                    }
+                }
                 SectionTitle { text: "Between sessions"; }
                 Card {
                     SettingRow {
