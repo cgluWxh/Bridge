@@ -29,7 +29,8 @@ export global Theme {
     out property <color> bad: #FF8A80;
     out property <color> bad-container: #5E2222;
 
-    out property <string> font: "Segoe UI Variable Text";
+    // Cover both Chinese and Latin text without relying on Segoe UI's CJK fallback.
+    out property <string> font: "Microsoft YaHei UI";
 }
 
 // A Material Symbol, tinted.

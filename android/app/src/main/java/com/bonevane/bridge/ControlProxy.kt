@@ -71,7 +71,21 @@ class ControlProxy(
                 n += r
             }
             when (String(head)) {
-                "VIDE", "AUDI", "CTRL", "CLIP", "INST", "PUSH", "LIST", "PULL" -> {
+                "PUSH" -> {
+                    if (TunnelState.openStreams.incrementAndGet() == 1) {
+                        TunnelService.current?.holdWifiAwake(true)
+                    }
+                    try {
+                        ReceivedFiles.receive(ctx, it)
+                    } finally {
+                        if (TunnelState.openStreams.decrementAndGet() == 0) {
+                            TunnelService.current?.holdWifiAwake(false)
+                        }
+                        TunnelState.macSeen()
+                    }
+                }
+
+                "VIDE", "AUDI", "CTRL", "CLIP", "INST", "LIST", "PULL" -> {
                     pipeToDaemon(it, head)
                 }
 
