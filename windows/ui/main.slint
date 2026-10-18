@@ -367,7 +367,15 @@ export component MainWindow inherits Window {
                 Label { text: "During focus mode"; }
                 ScrollView {
                     height: 220px;
-                    Text { text: AppState.focus-list == "" ? "No notifications collected" : AppState.focus-list; wrap: word-wrap; color: Theme.on-surface; }
+                    viewport-width: self.visible-width;
+                    viewport-height: focus-text.preferred-height;
+                    focus-text := Text {
+                        width: parent.width;
+                        height: self.preferred-height;
+                        text: AppState.focus-list == "" ? "No notifications collected" : AppState.focus-list;
+                        wrap: word-wrap;
+                        color: Theme.on-surface;
+                    }
                 }
                 PillButton { text: "Clear list"; clicked => { AppState.clear-focus(); } }
             }
