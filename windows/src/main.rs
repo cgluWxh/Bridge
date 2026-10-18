@@ -1252,7 +1252,12 @@ impl App {
                 }
                 match result {
                     Ok(image) => {
-                        if clipboard::sequence() != sequence || !self.mirror_window.as_ref().map(|w| w.window().is_active()).unwrap_or(false) {
+                        use slint::winit_030::WinitWindowAccessor;
+                        let focused = std::cell::Cell::new(false);
+                        if let Some(window) = &self.mirror_window {
+                            window.window().with_winit_window(|native| focused.set(native.has_focus()));
+                        }
+                        if clipboard::sequence() != sequence || !focused.get() {
                             notify::show("Bridge", "Paste cancelled", "Clipboard or focused window changed. Focus the chat and paste again.");
                             return;
                         }
