@@ -18,6 +18,26 @@ Rust and the Visual Studio Build Tools (C++ workload), then `cargo build --relea
 
 Everything it does is in `%APPDATA%\Bridge\Bridge.log` (tray → Open log folder).
 
+## Send files from Explorer to the phone
+
+At the bottom of Bridge's main window, **Windows Send To → Add to Send To**
+creates a per-user shortcut (no administrator privileges). Select files in
+Explorer, then **Send to → Bridge - Send to phone**. On Windows 11, open
+**Show more options** first. **Remove from Send To** removes only this shortcut.
+Registration uses Windows PowerShell and WScript.Shell; errors appear under the buttons.
+
+Bridge starts if needed; if already running, files go to the existing instance's
+transfer queue. Pair the phone first. No mirroring is needed; files land in the
+phone's Download folder. Folders and unavailable paths are rejected, while valid
+files in the same selection continue. Requests use a local per-user inbox and
+are consumed once, not a resumable transfer history. Keep Bridge.exe in place;
+after moving it, click Add to Send To again to update the shortcut.
+
+Manual checks on Windows: add/remove twice; send with Bridge stopped and in the
+tray; select multiple files with Chinese names/spaces and an empty file; select
+a folder alone and mixed with files; launch two selections concurrently; test
+unpaired/disconnected phones and registration failure feedback.
+
 ## Receive files shared from Android
 
 Use updated builds on **both** devices. With Bridge running on Windows and its

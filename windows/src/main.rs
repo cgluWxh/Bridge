@@ -26,6 +26,7 @@ mod notify;
 mod protocol;
 mod scrcpy;
 mod session;
+mod send_to;
 mod settings;
 mod store;
 mod tunnel;
@@ -1872,7 +1873,7 @@ fn single_instance() -> Option<windows::Win32::Foundation::HANDLE> {
         // Never closed: it lives as long as this process, which is the point.
         let _mutex = CreateMutexW(None, true, w!("Local\\Bridge-Bonevane-instance"));
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            if !std::env::args().any(|a| a == "--tray") {
+            if !std::env::args_os().any(|a| a == "--tray" || a == "--send") {
                 if let Ok(ev) = OpenEventW(EVENT_MODIFY_STATE, false, w!("Local\\Bridge-Bonevane-show")) {
                     let _ = SetEvent(ev);
                 }
@@ -1884,14 +1885,41 @@ fn single_instance() -> Option<windows::Win32::Foundation::HANDLE> {
 }
 
 fn main() {
-    let show_event = single_instance();
     log::init();
+    // Publish before the mutex check, even during a concurrent cold launch.
+    let sending = match send_to::publish_args() {
+        Ok(sending) => sending,
+        Err(e) => {
+            use windows::core::PCWSTR;
+            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONERROR};
+            let text: Vec<u16> = format!("Could not send files: {e:#}").encode_utf16().chain(Some(0)).collect();
+            unsafe { MessageBoxW(None, PCWSTR(text.as_ptr()), windows::core::w!("Bridge"), MB_OK | MB_ICONERROR); }
+            return;
+        }
+    };
+    let show_event = single_instance();
     crate::log!("", "Bridge {VERSION} starting");
 
     let window = MainWindow::new().expect("window");
     let settings_window = SettingsWindow::new().expect("settings window");
     let files_window = FilesWindow::new().expect("files window");
     let app = Rc::new(RefCell::new(App::new(window.clone_strong(), settings_window.clone_strong(), files_window.clone_strong())));
+
+    {
+        let w = window.as_weak();
+        window.global::<AppState>().on_register_send_to(move |remove| {
+            let w = w.clone();
+            std::thread::spawn(move || {
+                let status = match send_to::register(remove) {
+                    Ok(()) => if remove { "Removed from Send To.".to_string() } else { "Added to Send To. Keep Bridge.exe at its current location.".to_string() },
+                    Err(e) => format!("{e:#}"),
+                };
+                let _ = w.upgrade_in_event_loop(move |w| {
+                    w.global::<AppState>().set_send_to_status(status.into());
+                });
+            });
+        });
+    }
 
     // Tray: left-click shows the window; quick actions reuse the main UI callbacks.
     let menu = tray_icon::menu::Menu::new();
@@ -2189,6 +2217,22 @@ fn main() {
         let tray_clicks = tray_icon::TrayIconEvent::receiver();
         timer.start(TimerMode::Repeated, Duration::from_millis(250), move || {
             a.borrow_mut().poll();
+            let paths = send_to::drain();
+            if !paths.is_empty() {
+                let mut app = a.borrow_mut();
+                let mut rejected = Vec::new();
+                for path in paths {
+                    if path.is_file() { app.queue_push(path); }
+                    else { rejected.push(path.display().to_string()); }
+                }
+                if !rejected.is_empty() {
+                    let message = format!("Rejected folders or unavailable files: {}. Only regular files can be sent.", rejected.join("; "));
+                    app.log("send-to", &message);
+                    app.files_window.window().set_minimized(false);
+                    let _ = app.files_window.show();
+                    app.files_window.set_status(message.into());
+                }
+            }
             window_bounds::constrain_windows();
             // Minimise = to the tray, like close. Slint has no minimise
             // callback, so watch the state: un-minimise (so a later show()
@@ -2269,7 +2313,7 @@ fn main() {
 
     // Started at login (--tray): stay in the tray until clicked. The loop
     // must keep running with every window hidden, hence until_quit.
-    if !std::env::args().any(|a| a == "--tray") {
+    if !sending && !std::env::args_os().any(|a| a == "--tray") {
         window.show().expect("window");
     }
     slint::run_event_loop_until_quit().expect("event loop");

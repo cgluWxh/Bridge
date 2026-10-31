@@ -76,6 +76,8 @@ export global AppState {
     callback pair-from-clipboard();
     callback open-settings();
     callback open-log-folder();
+    callback register-send-to(bool);
+    in-out property <string> send-to-status: "";
     callback quit();
 }
 
@@ -462,6 +464,20 @@ export component MainWindow inherits Window {
                 }
                 PillButton { text: "Open log folder"; icon: @image-url("icons/folder.svg"); clicked => { AppState.open-log-folder(); } }
             }
+        }
+
+        SectionTitle { text: "Windows Send To"; }
+        Card {
+            Tile {
+                icon: @image-url("icons/folder.svg"); title: "Send files to phone";
+                subtitle: "Explorer → Send to · files only, no folders";
+            }
+            HorizontalLayout {
+                padding: 12px; spacing: 8px;
+                PillButton { text: "Add to Send To"; clicked => { AppState.register-send-to(false); } }
+                PillButton { text: "Remove from Send To"; clicked => { AppState.register-send-to(true); } }
+            }
+            if AppState.send-to-status != "" : Muted { text: AppState.send-to-status; }
         }
 
         Muted { text: "Bridge " + AppState.version + "  ·  made by Bonevane"; horizontal-alignment: center; }
