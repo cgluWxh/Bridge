@@ -203,6 +203,7 @@ class BleLink(
         private set(value) {
             field = value
             TunnelState.macLinked = value
+            WakeOnNotification.onLinkChanged(context, value)
         }
 
     @Volatile private var beating = false
